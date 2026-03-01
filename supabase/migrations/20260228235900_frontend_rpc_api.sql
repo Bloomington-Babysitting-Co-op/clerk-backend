@@ -549,6 +549,28 @@ begin
 end;
 $$;
 
+create or replace function public.rpc_cancel_request(p_request_id uuid)
+returns void
+language plpgsql
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  update public.requests
+  set status = 'cancelled',
+      accepted_by = null
+  where id = p_request_id
+    and owner = auth.uid()
+    and status in ('open', 'claimed', 'accepted');
+
+  if not found then
+    raise exception 'Request not found or cannot be cancelled';
+  end if;
+end;
+$$;
+
 grant select, insert on table public.claims to authenticated;
 grant select, insert on table public.claims to service_role;
 
@@ -564,6 +586,7 @@ grant execute on function public.rpc_update_request(uuid, date, timestamptz, tim
 grant execute on function public.rpc_claim_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
+grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
