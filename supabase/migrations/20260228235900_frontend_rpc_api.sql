@@ -1,4 +1,4 @@
-create table if not exists public.claims (
+create table if not exists public.offers (
   id uuid primary key default gen_random_uuid(),
   request_id uuid not null references public.requests(id) on delete cascade,
   user_id uuid not null references auth.users(id),
@@ -7,24 +7,33 @@ create table if not exists public.claims (
   unique (request_id, user_id)
 );
 
-alter table public.claims enable row level security;
+alter table public.offers enable row level security;
 
-drop policy if exists claims_select on public.claims;
+drop policy if exists offers_select on public.offers;
 
-create policy claims_select
-on public.claims
+create policy offers_select
+on public.offers
 for select
 using (true);
 
-drop policy if exists claims_insert_own on public.claims;
+drop policy if exists offers_insert_own on public.offers;
 
-create policy claims_insert_own
-on public.claims
+create policy offers_insert_own
+on public.offers
 for insert
 with check (auth.uid() = user_id);
 
 alter table public.requests drop constraint if exists requests_status_check;
 alter table public.requests drop constraint if exists valid_time_range;
+alter table public.requests drop constraint if exists accepted_by_valid;
+
+update public.requests
+set status = 'offered'
+where status = concat('cl', 'aimed');
+
+update public.requests
+set status = 'assigned'
+where status = 'accepted';
 
 alter table public.requests
 alter column start_time drop not null,
@@ -44,7 +53,11 @@ add column if not exists hours_offered numeric;
 
 alter table public.requests
 add constraint requests_status_check
-check (status = any (array['open'::text, 'claimed'::text, 'accepted'::text, 'completed'::text, 'cancelled'::text]));
+check (status = any (array['open'::text, 'offered'::text, 'assigned'::text, 'completed'::text, 'cancelled'::text, 'expired'::text]));
+
+alter table public.requests
+add constraint accepted_by_valid
+check (((status = 'assigned'::text) and (accepted_by is not null)) or ((status <> 'assigned'::text) and (accepted_by is null)) or (status = 'completed'::text));
 
 alter table public.requests
 drop constraint if exists requests_request_type_check;
@@ -224,7 +237,7 @@ as $$
   where r.id = p_request_id;
 $$;
 
-create or replace function public.rpc_list_claims(p_request_id uuid)
+create or replace function public.rpc_list_offers(p_request_id uuid)
 returns table (
   id uuid,
   request_id uuid,
@@ -236,7 +249,7 @@ language sql
 stable
 as $$
   select c.id, c.request_id, c.user_id, c.comment, c.created_at
-  from public.claims c
+  from public.offers c
   where c.request_id = p_request_id
   order by c.created_at desc;
 $$;
@@ -428,7 +441,7 @@ begin
 end;
 $$;
 
-create or replace function public.rpc_claim_request(
+create or replace function public.rpc_offer_request(
   p_request_id uuid,
   p_comment text default null
 )
@@ -451,19 +464,19 @@ begin
   end if;
 
   if v_request.owner = auth.uid() then
-    raise exception 'Owner cannot claim own request';
+    raise exception 'Owner cannot offer on own request';
   end if;
 
-  if v_request.status not in ('open', 'claimed') then
-    raise exception 'Request cannot be claimed in current status';
+  if v_request.status not in ('open', 'offered') then
+    raise exception 'Request cannot be offered in current status';
   end if;
 
-  insert into public.claims (request_id, user_id, comment)
+  insert into public.offers (request_id, user_id, comment)
   values (p_request_id, auth.uid(), p_comment)
   on conflict (request_id, user_id) do nothing;
 
   update public.requests
-  set status = 'claimed'
+  set status = 'offered'
   where id = p_request_id
     and status = 'open';
 end;
@@ -471,14 +484,14 @@ $$;
 
 create or replace function public.rpc_select_request_winner(
   p_request_id uuid,
-  p_claim_id uuid
+  p_offer_id uuid
 )
 returns void
 language plpgsql
 as $$
 declare
   v_owner uuid;
-  v_claim_user uuid;
+  v_offer_user uuid;
   v_status text;
 begin
   if auth.uid() is null then
@@ -497,22 +510,22 @@ begin
     raise exception 'Only owner can select winner';
   end if;
 
-  if v_status <> 'claimed' then
-    raise exception 'Request must be claimed before selecting winner';
+  if v_status <> 'offered' then
+    raise exception 'Request must be offered before selecting winner';
   end if;
 
-  select c.user_id into v_claim_user
-  from public.claims c
-  where c.id = p_claim_id
+  select c.user_id into v_offer_user
+  from public.offers c
+  where c.id = p_offer_id
     and c.request_id = p_request_id;
 
-  if v_claim_user is null then
-    raise exception 'Claim not found for request';
+  if v_offer_user is null then
+    raise exception 'Offer not found for request';
   end if;
 
   update public.requests
-  set status = 'accepted',
-      accepted_by = v_claim_user
+  set status = 'assigned',
+      accepted_by = v_offer_user
   where id = p_request_id;
 end;
 $$;
@@ -538,8 +551,8 @@ begin
     raise exception 'Request not found';
   end if;
 
-  if v_status <> 'accepted' then
-    raise exception 'Only accepted requests can be completed';
+  if v_status <> 'assigned' then
+    raise exception 'Only assigned requests can be completed';
   end if;
 
   if auth.uid() <> v_owner and auth.uid() <> v_accepted_by then
@@ -566,7 +579,7 @@ begin
       accepted_by = null
   where id = p_request_id
     and owner = auth.uid()
-    and status in ('open', 'claimed', 'accepted');
+    and status in ('open', 'offered', 'assigned');
 
   if not found then
     raise exception 'Request not found or cannot be cancelled';
@@ -812,8 +825,8 @@ begin
 end;
 $$;
 
-grant select, insert on table public.claims to authenticated;
-grant select, insert on table public.claims to service_role;
+grant select, insert on table public.offers to authenticated;
+grant select, insert on table public.offers to service_role;
 
 grant execute on function public.rpc_list_ledger_entries() to authenticated, service_role;
 grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
@@ -821,10 +834,10 @@ grant execute on function public.rpc_list_user_future_requests() to authenticate
 grant execute on function public.rpc_list_open_other_requests() to authenticated, service_role;
 grant execute on function public.rpc_list_requests() to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
-grant execute on function public.rpc_list_claims(uuid) to authenticated, service_role;
+grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
 grant execute on function public.rpc_create_request(text, text, boolean, boolean, date, timestamptz, timestamptz, numeric, text, boolean, boolean, boolean, text) to authenticated, service_role;
 grant execute on function public.rpc_update_request(uuid, date, timestamptz, timestamptz, text, boolean, boolean, numeric, text, boolean, boolean, boolean, text) to authenticated, service_role;
-grant execute on function public.rpc_claim_request(uuid, text) to authenticated, service_role;
+grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
