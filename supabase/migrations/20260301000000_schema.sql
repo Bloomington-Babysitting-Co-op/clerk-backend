@@ -580,7 +580,7 @@ alter column start_time drop not null,
 alter column end_time drop not null;
 
 alter table public.requests
-add column request_type text not null default 'other',
+add column request_type text not null,
 add column sit_location text,
 add column meal_required boolean not null default false,
 add column meal_prepared_by_sitter boolean not null default false,
@@ -602,7 +602,7 @@ check (((status = 'assigned'::text) and (accepted_by is not null)) or ((status <
 
 alter table public.requests
 add constraint requests_request_type_check
-check (request_type = any (array['babysit'::text, 'drive'::text, 'favor'::text, 'other'::text]));
+check (request_type = any (array['babysit'::text, 'drive'::text, 'favor'::text]));
 
 alter table public.requests
 add constraint requests_sit_location_check
@@ -807,7 +807,7 @@ begin
         raise exception 'Not authenticated';
     end if;
 
-    if p_request_type not in ('babysit', 'drive', 'favor', 'other') then
+    if p_request_type not in ('babysit', 'drive', 'favor') then
         raise exception 'Invalid request type';
     end if;
 
