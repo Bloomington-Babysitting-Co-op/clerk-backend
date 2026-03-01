@@ -860,7 +860,7 @@ begin
     from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
-      and p.proname like 'rpc\_%' escape '\\'
+      and p.proname like 'rpc!_%' escape '!'
   loop
     execute format(
       'grant execute on function %I.%I(%s) to authenticated',
