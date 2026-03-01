@@ -586,6 +586,8 @@ add column meal_required boolean not null default false,
 add column meal_prepared_by_sitter boolean not null default false,
 add column sitters_kids_welcome boolean not null default false,
 add column allergies_or_pet_concerns text,
+add column origin text,
+add column destination text,
 add column flexible_date boolean not null default false,
 add column flexible_start_time boolean not null default false,
 add column flexible_end_time boolean not null default false,
@@ -794,7 +796,9 @@ create or replace function public.rpc_create_request(
     p_meal_required boolean default false,
     p_meal_prepared_by_sitter boolean default false,
     p_sitters_kids_welcome boolean default false,
-    p_allergies_or_pet_concerns text default null
+    p_allergies_or_pet_concerns text default null,
+    p_origin text default null,
+    p_destination text default null
 )
 returns uuid
 language plpgsql
@@ -861,6 +865,8 @@ begin
         meal_prepared_by_sitter,
         sitters_kids_welcome,
         allergies_or_pet_concerns,
+        origin,
+        destination,
         status
     )
     values (
@@ -879,6 +885,8 @@ begin
         coalesce(p_meal_prepared_by_sitter, false),
         coalesce(p_sitters_kids_welcome, false),
         p_allergies_or_pet_concerns,
+        case when p_request_type = 'drive' then p_origin else null end,
+        case when p_request_type = 'drive' then p_destination else null end,
         'open'
     )
     returning id into v_id;
@@ -901,7 +909,9 @@ create or replace function public.rpc_update_request(
     p_meal_required boolean default false,
     p_meal_prepared_by_sitter boolean default false,
     p_sitters_kids_welcome boolean default false,
-    p_allergies_or_pet_concerns text default null
+    p_allergies_or_pet_concerns text default null,
+    p_origin text default null,
+    p_destination text default null
 )
 returns void
 language plpgsql
@@ -971,7 +981,9 @@ begin
             meal_required = case when v_request_type = 'babysit' then coalesce(p_meal_required, false) else false end,
             meal_prepared_by_sitter = case when v_request_type = 'babysit' then coalesce(p_meal_prepared_by_sitter, false) else false end,
             sitters_kids_welcome = case when v_request_type = 'babysit' then coalesce(p_sitters_kids_welcome, false) else false end,
-            allergies_or_pet_concerns = case when v_request_type = 'babysit' then p_allergies_or_pet_concerns else null end
+            allergies_or_pet_concerns = case when v_request_type = 'babysit' then p_allergies_or_pet_concerns else null end,
+            origin = case when v_request_type = 'drive' then p_origin else null end,
+            destination = case when v_request_type = 'drive' then p_destination else null end
     where id = p_request_id;
 end;
 $$;
@@ -1370,8 +1382,8 @@ grant execute on function public.rpc_list_open_other_requests() to authenticated
 grant execute on function public.rpc_list_requests() to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
-grant execute on function public.rpc_create_request(text, text, boolean, boolean, boolean, date, timestamptz, timestamptz, numeric, text, boolean, boolean, boolean, text) to authenticated, service_role;
-grant execute on function public.rpc_update_request(uuid, date, boolean, boolean, boolean, timestamptz, timestamptz, text, numeric, text, boolean, boolean, boolean, text) to authenticated, service_role;
+grant execute on function public.rpc_create_request(text, text, boolean, boolean, boolean, date, timestamptz, timestamptz, numeric, text, boolean, boolean, boolean, text, text, text) to authenticated, service_role;
+grant execute on function public.rpc_update_request(uuid, date, boolean, boolean, boolean, timestamptz, timestamptz, text, numeric, text, boolean, boolean, boolean, text, text, text) to authenticated, service_role;
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
