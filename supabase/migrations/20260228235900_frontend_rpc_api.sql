@@ -84,6 +84,9 @@ alter table public.requests
 add constraint requests_meal_prepared_requires_meal_check
 check (not meal_prepared_by_sitter or meal_required);
 
+alter table public.ledger_entries
+alter column request drop not null;
+
 create or replace function public.create_ledger_on_completion()
 returns trigger
 language plpgsql
@@ -571,6 +574,244 @@ begin
 end;
 $$;
 
+create or replace function public.rpc_is_admin()
+returns boolean
+language sql
+stable
+as $$
+  select exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.is_admin = true
+  );
+$$;
+
+create or replace function public.rpc_has_completed_sit_this_month()
+returns boolean
+language sql
+stable
+as $$
+  select exists (
+    select 1
+    from public.ledger_entries le
+    join public.requests r on r.id = le.request
+    where le.from_user = auth.uid()
+      and r.request_type = 'babysit'
+      and le.timestamp >= date_trunc('month', now())
+      and le.timestamp < date_trunc('month', now()) + interval '1 month'
+  );
+$$;
+
+create or replace function public.rpc_list_ledger_balances()
+returns table (
+  user_id uuid,
+  family_name text,
+  hours_balance numeric
+)
+language sql
+stable
+as $$
+  with users as (
+    select p.id as user_id, p.family_name
+    from public.profiles p
+  ),
+  balances as (
+    select
+      u.user_id,
+      u.family_name,
+      coalesce(sum(
+        case
+          when le.to_user = u.user_id then le.hours
+          when le.from_user = u.user_id then -le.hours
+          else 0
+        end
+      ), 0) as hours_balance
+    from users u
+    left join public.ledger_entries le
+      on le.to_user = u.user_id or le.from_user = u.user_id
+    group by u.user_id, u.family_name
+  )
+  select b.user_id, b.family_name, b.hours_balance
+  from balances b
+  order by b.family_name nulls last, b.user_id;
+$$;
+
+create or replace function public.rpc_list_ledger_entries_filtered(
+  p_start_date date default null,
+  p_end_date date default null
+)
+returns table (
+  id uuid,
+  request uuid,
+  timestamp timestamptz,
+  hours numeric,
+  from_user uuid,
+  to_user uuid
+)
+language sql
+stable
+as $$
+  select le.id, le.request, le.timestamp, le.hours, le.from_user, le.to_user
+  from public.ledger_entries le
+  where (p_start_date is null or le.timestamp >= p_start_date::timestamptz)
+    and (p_end_date is null or le.timestamp < (p_end_date::timestamptz + interval '1 day'))
+  order by le.timestamp desc;
+$$;
+
+create or replace function public.rpc_list_completed_sits_for_prefill()
+returns table (
+  request_id uuid,
+  from_user uuid,
+  to_user uuid,
+  hours numeric,
+  completed_at timestamptz,
+  notes text
+)
+language sql
+stable
+as $$
+  select
+    r.id as request_id,
+    r.owner as from_user,
+    r.accepted_by as to_user,
+    coalesce(
+      r.hours_offered,
+      case
+        when r.start_time is not null and r.end_time is not null
+          then extract(epoch from (r.end_time - r.start_time)) / 3600
+        else null
+      end
+    ) as hours,
+    le.timestamp as completed_at,
+    r.notes
+  from public.requests r
+  join public.ledger_entries le on le.request = r.id
+  where r.status = 'completed'
+  order by le.timestamp desc;
+$$;
+
+create or replace function public.rpc_list_profiles_for_entry()
+returns table (
+  id uuid,
+  family_name text
+)
+language sql
+stable
+as $$
+  select p.id, coalesce(p.family_name, p.id::text) as family_name
+  from public.profiles p
+  order by p.family_name nulls last, p.id;
+$$;
+
+create or replace function public.rpc_create_manual_ledger_entry(
+  p_request uuid default null,
+  p_from_user uuid,
+  p_to_user uuid,
+  p_hours numeric,
+  p_timestamp timestamptz default null
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_id uuid;
+  v_is_admin boolean;
+  v_to_user uuid;
+  v_timestamp timestamptz;
+begin
+  v_is_admin := public.rpc_is_admin();
+
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  if v_is_admin then
+    v_to_user := p_to_user;
+    v_timestamp := coalesce(p_timestamp, now());
+  else
+    if p_to_user <> auth.uid() then
+      raise exception 'Non-admin entries must use yourself as recipient';
+    end if;
+    v_to_user := auth.uid();
+    v_timestamp := now();
+  end if;
+
+  if p_hours is null or p_hours <= 0 then
+    raise exception 'Hours must be greater than zero';
+  end if;
+
+  if p_from_user = v_to_user then
+    raise exception 'From user and to user must be different';
+  end if;
+
+  insert into public.ledger_entries (request, from_user, to_user, hours, timestamp)
+  values (
+    p_request,
+    p_from_user,
+    v_to_user,
+    p_hours,
+    v_timestamp
+  )
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+create or replace function public.rpc_get_ledger_entry(p_entry_id uuid)
+returns table (
+  id uuid,
+  request uuid,
+  from_user uuid,
+  to_user uuid,
+  hours numeric,
+  timestamp timestamptz
+)
+language sql
+stable
+as $$
+  select le.id, le.request, le.from_user, le.to_user, le.hours, le.timestamp
+  from public.ledger_entries le
+  where le.id = p_entry_id;
+$$;
+
+create or replace function public.rpc_update_ledger_entry(
+  p_entry_id uuid,
+  p_from_user uuid,
+  p_to_user uuid,
+  p_hours numeric,
+  p_timestamp timestamptz default null
+)
+returns void
+language plpgsql
+as $$
+begin
+  if not public.rpc_is_admin() then
+    raise exception 'Admin only';
+  end if;
+
+  if p_hours is null or p_hours <= 0 then
+    raise exception 'Hours must be greater than zero';
+  end if;
+
+  if p_from_user = p_to_user then
+    raise exception 'From user and to user must be different';
+  end if;
+
+  update public.ledger_entries
+  set from_user = p_from_user,
+      to_user = p_to_user,
+      hours = p_hours,
+      timestamp = coalesce(p_timestamp, timestamp)
+  where id = p_entry_id;
+
+  if not found then
+    raise exception 'Ledger entry not found';
+  end if;
+end;
+$$;
+
 grant select, insert on table public.claims to authenticated;
 grant select, insert on table public.claims to service_role;
 
@@ -587,6 +828,15 @@ grant execute on function public.rpc_claim_request(uuid, text) to authenticated,
 grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
+grant execute on function public.rpc_is_admin() to authenticated, service_role;
+grant execute on function public.rpc_has_completed_sit_this_month() to authenticated, service_role;
+grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
+grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
+grant execute on function public.rpc_list_completed_sits_for_prefill() to authenticated, service_role;
+grant execute on function public.rpc_list_profiles_for_entry() to authenticated, service_role;
+grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
+grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
+grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
 
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
