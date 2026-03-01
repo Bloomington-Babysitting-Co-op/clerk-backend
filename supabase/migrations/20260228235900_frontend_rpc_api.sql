@@ -705,10 +705,10 @@ as $$
 $$;
 
 create or replace function public.rpc_create_manual_ledger_entry(
-  p_request uuid default null,
   p_from_user uuid,
   p_to_user uuid,
   p_hours numeric,
+  p_request uuid default null,
   p_timestamp timestamptz default null
 )
 returns uuid
@@ -834,7 +834,7 @@ grant execute on function public.rpc_list_ledger_balances() to authenticated, se
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
 grant execute on function public.rpc_list_completed_sits_for_prefill() to authenticated, service_role;
 grant execute on function public.rpc_list_profiles_for_entry() to authenticated, service_role;
-grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
+grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, timestamptz) to authenticated, service_role;
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
 grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
 
