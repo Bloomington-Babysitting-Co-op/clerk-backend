@@ -82,6 +82,26 @@ create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   family_name text,
   phone text,
+  parent_member_names text,
+  member_emails text,
+  member_phones text,
+  address text,
+  emergency_contact_names text,
+  emergency_contact_phones text,
+  children_details text,
+  pets text,
+  family_photo_url text,
+  business_information text,
+  notify_new_request boolean not null default false,
+  notify_unoffered_48h boolean not null default false,
+  notify_request_offered boolean not null default false,
+  notify_offer_cancelled_or_edited boolean not null default false,
+  notify_ledger_debtor boolean not null default false,
+  notify_midmonth_inactive boolean not null default false,
+  admin_date_joined date,
+  admin_last_background_check date,
+  admin_last_dues_payment date,
+  admin_general_notes text,
   is_admin boolean default false,
   created_at timestamptz default now()
 );
@@ -702,6 +722,183 @@ as $$
   );
 $$;
 
+-- RPC: fetch current user's profile details for profile page
+create or replace function public.rpc_get_my_profile_details()
+returns table (
+  id uuid,
+  family_name text,
+  phone text,
+  parent_member_names text,
+  member_emails text,
+  member_phones text,
+  address text,
+  emergency_contact_names text,
+  emergency_contact_phones text,
+  children_details text,
+  pets text,
+  family_photo_url text,
+  business_information text,
+  notify_new_request boolean,
+  notify_unoffered_48h boolean,
+  notify_request_offered boolean,
+  notify_offer_cancelled_or_edited boolean,
+  notify_ledger_debtor boolean,
+  notify_midmonth_inactive boolean,
+  admin_date_joined date,
+  admin_last_background_check date,
+  admin_last_dues_payment date,
+  admin_general_notes text,
+  is_admin boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    p.id,
+    p.family_name,
+    p.phone,
+    p.parent_member_names,
+    p.member_emails,
+    p.member_phones,
+    p.address,
+    p.emergency_contact_names,
+    p.emergency_contact_phones,
+    p.children_details,
+    p.pets,
+    p.family_photo_url,
+    p.business_information,
+    p.notify_new_request,
+    p.notify_unoffered_48h,
+    p.notify_request_offered,
+    p.notify_offer_cancelled_or_edited,
+    p.notify_ledger_debtor,
+    p.notify_midmonth_inactive,
+    p.admin_date_joined,
+    p.admin_last_background_check,
+    p.admin_last_dues_payment,
+    p.admin_general_notes,
+    p.is_admin
+  from public.profiles p
+  where p.id = auth.uid();
+$$;
+
+-- RPC: upsert current user's profile details and notification preferences
+create or replace function public.rpc_upsert_my_profile_details(
+  p_family_name text default null,
+  p_phone text default null,
+  p_parent_member_names text default null,
+  p_member_emails text default null,
+  p_member_phones text default null,
+  p_address text default null,
+  p_emergency_contact_names text default null,
+  p_emergency_contact_phones text default null,
+  p_children_details text default null,
+  p_pets text default null,
+  p_family_photo_url text default null,
+  p_business_information text default null,
+  p_notify_new_request boolean default false,
+  p_notify_unoffered_48h boolean default false,
+  p_notify_request_offered boolean default false,
+  p_notify_offer_cancelled_or_edited boolean default false,
+  p_notify_ledger_debtor boolean default false,
+  p_notify_midmonth_inactive boolean default false,
+  p_admin_date_joined date default null,
+  p_admin_last_background_check date default null,
+  p_admin_last_dues_payment date default null,
+  p_admin_general_notes text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_is_admin boolean;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  v_is_admin := public.rpc_is_admin();
+
+  insert into public.profiles (
+    id,
+    family_name,
+    phone,
+    parent_member_names,
+    member_emails,
+    member_phones,
+    address,
+    emergency_contact_names,
+    emergency_contact_phones,
+    children_details,
+    pets,
+    family_photo_url,
+    business_information,
+    notify_new_request,
+    notify_unoffered_48h,
+    notify_request_offered,
+    notify_offer_cancelled_or_edited,
+    notify_ledger_debtor,
+    notify_midmonth_inactive,
+    admin_date_joined,
+    admin_last_background_check,
+    admin_last_dues_payment,
+    admin_general_notes
+  )
+  values (
+    auth.uid(),
+    p_family_name,
+    p_phone,
+    p_parent_member_names,
+    p_member_emails,
+    p_member_phones,
+    p_address,
+    p_emergency_contact_names,
+    p_emergency_contact_phones,
+    p_children_details,
+    p_pets,
+    p_family_photo_url,
+    p_business_information,
+    coalesce(p_notify_new_request, false),
+    coalesce(p_notify_unoffered_48h, false),
+    coalesce(p_notify_request_offered, false),
+    coalesce(p_notify_offer_cancelled_or_edited, false),
+    coalesce(p_notify_ledger_debtor, false),
+    coalesce(p_notify_midmonth_inactive, false),
+    case when v_is_admin then p_admin_date_joined else null end,
+    case when v_is_admin then p_admin_last_background_check else null end,
+    case when v_is_admin then p_admin_last_dues_payment else null end,
+    case when v_is_admin then p_admin_general_notes else null end
+  )
+  on conflict (id) do update
+  set family_name = excluded.family_name,
+      phone = excluded.phone,
+      parent_member_names = excluded.parent_member_names,
+      member_emails = excluded.member_emails,
+      member_phones = excluded.member_phones,
+      address = excluded.address,
+      emergency_contact_names = excluded.emergency_contact_names,
+      emergency_contact_phones = excluded.emergency_contact_phones,
+      children_details = excluded.children_details,
+      pets = excluded.pets,
+      family_photo_url = excluded.family_photo_url,
+      business_information = excluded.business_information,
+      notify_new_request = excluded.notify_new_request,
+      notify_unoffered_48h = excluded.notify_unoffered_48h,
+      notify_request_offered = excluded.notify_request_offered,
+      notify_offer_cancelled_or_edited = excluded.notify_offer_cancelled_or_edited,
+      notify_ledger_debtor = excluded.notify_ledger_debtor,
+      notify_midmonth_inactive = excluded.notify_midmonth_inactive,
+      admin_date_joined = case when v_is_admin then excluded.admin_date_joined else public.profiles.admin_date_joined end,
+      admin_last_background_check = case when v_is_admin then excluded.admin_last_background_check else public.profiles.admin_last_background_check end,
+      admin_last_dues_payment = case when v_is_admin then excluded.admin_last_dues_payment else public.profiles.admin_last_dues_payment end,
+      admin_general_notes = case when v_is_admin then excluded.admin_general_notes else public.profiles.admin_general_notes end;
+end;
+$$;
+
 -- RPC: ledger entries filtered by optional date range
 create or replace function public.rpc_list_ledger_entries_filtered(
   p_start_date date default null,
@@ -953,6 +1150,8 @@ grant execute on function public.rpc_list_user_future_requests() to authenticate
 grant execute on function public.rpc_list_open_other_requests() to authenticated, service_role;
 grant execute on function public.rpc_has_completed_sit_this_month() to authenticated, service_role;
 grant execute on function public.rpc_is_admin() to authenticated, service_role;
+grant execute on function public.rpc_get_my_profile_details() to authenticated, service_role;
+grant execute on function public.rpc_upsert_my_profile_details(text, text, text, text, text, text, text, text, text, text, text, text, boolean, boolean, boolean, boolean, boolean, boolean, date, date, date, text) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
 grant execute on function public.rpc_list_completed_sits_for_prefill() to authenticated, service_role;
