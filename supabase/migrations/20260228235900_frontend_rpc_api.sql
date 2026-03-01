@@ -838,6 +838,37 @@ grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, nume
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
 grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
 
+do $$
+declare
+  fn record;
+begin
+  for fn in
+    select
+      n.nspname as schema_name,
+      p.proname as function_name,
+      pg_get_function_identity_arguments(p.oid) as function_args
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname like 'rpc!_%' escape '!'
+  loop
+    execute format(
+      'alter function %I.%I(%s) security definer',
+      fn.schema_name,
+      fn.function_name,
+      fn.function_args
+    );
+
+    execute format(
+      'alter function %I.%I(%s) set search_path = public',
+      fn.schema_name,
+      fn.function_name,
+      fn.function_args
+    );
+  end loop;
+end;
+$$;
+
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
 revoke all on all functions in schema public from anon, authenticated;
