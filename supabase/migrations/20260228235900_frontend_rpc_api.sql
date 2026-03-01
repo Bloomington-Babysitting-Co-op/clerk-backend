@@ -117,7 +117,7 @@ $$;
 
 create or replace function public.rpc_list_ledger_entries()
 returns table (
-  timestamp timestamptz,
+  "timestamp" timestamptz,
   hours numeric,
   from_user uuid,
   to_user uuid
@@ -644,7 +644,7 @@ create or replace function public.rpc_list_ledger_entries_filtered(
 returns table (
   id uuid,
   request uuid,
-  timestamp timestamptz,
+  "timestamp" timestamptz,
   hours numeric,
   from_user uuid,
   to_user uuid
@@ -766,7 +766,7 @@ returns table (
   from_user uuid,
   to_user uuid,
   hours numeric,
-  timestamp timestamptz
+  "timestamp" timestamptz
 )
 language sql
 stable
@@ -803,7 +803,7 @@ begin
   set from_user = p_from_user,
       to_user = p_to_user,
       hours = p_hours,
-      timestamp = coalesce(p_timestamp, timestamp)
+      "timestamp" = coalesce(p_timestamp, public.ledger_entries."timestamp")
   where id = p_entry_id;
 
   if not found then
