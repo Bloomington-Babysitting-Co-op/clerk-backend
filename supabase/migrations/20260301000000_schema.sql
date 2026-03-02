@@ -572,16 +572,12 @@ begin
     raise exception 'Description is required';
   end if;
 
-  if p_request_type in ('babysit', 'drive') and p_request_date is null and not coalesce(p_flexible_date, false) then
-    raise exception 'Date is required for babysit and drive requests';
+  if p_request_date is null then
+    raise exception 'Request date is required';
   end if;
 
-  if p_start_time is not null and p_request_date is null and not coalesce(p_flexible_date, false) then
-    raise exception 'Date is required when start time is provided unless date is marked flexible';
-  end if;
-
-  if p_end_time is not null and p_request_date is null and not coalesce(p_flexible_date, false) then
-    raise exception 'Date is required when end time is provided unless date is marked flexible';
+  if p_request_date is not null and p_request_date < current_date then
+    raise exception 'Request date cannot be in the past';
   end if;
 
   if p_start_time is not null and p_end_time is not null and p_end_time <= p_start_time then
@@ -711,16 +707,12 @@ begin
     raise exception 'Request not found or not editable';
   end if;
 
-  if v_request_type in ('babysit', 'drive') and p_request_date is null and not coalesce(p_flexible_date, false) then
-    raise exception 'Date is required for babysit and drive requests';
+  if p_request_date is null then
+    raise exception 'Request date is required';
   end if;
 
-  if p_start_time is not null and p_request_date is null and not coalesce(p_flexible_date, false) then
-    raise exception 'Date is required when start time is provided unless date is marked flexible';
-  end if;
-
-  if p_end_time is not null and p_request_date is null and not coalesce(p_flexible_date, false) then
-    raise exception 'Date is required when end time is provided unless date is marked flexible';
+  if p_request_date is not null and p_request_date < current_date then
+    raise exception 'Request date cannot be in the past';
   end if;
 
   if p_start_time is not null and p_end_time is not null and p_end_time <= p_start_time then
@@ -960,7 +952,7 @@ as $$
   cross join me;
 $$;
 
--- RPC: dashboard requests created by current user with future schedules
+-- RPC: dashboard active requests created by current user
 create or replace function public.rpc_list_user_future_requests()
 returns table (
   id uuid,
@@ -998,11 +990,13 @@ as $$
   from public.requests r
   cross join me
   where r.requester_family_id = me.family_id
+    and r.status not in ('completed', 'cancelled', 'expired')
     and (
       (r.end_time is not null and r.end_time >= now())
       or (r.end_time is null and r.request_date is not null and r.request_date >= current_date)
+      or (r.request_date is null and coalesce(r.flexible_date, false))
     )
-  order by r.start_time asc;
+  order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
 $$;
 
 -- RPC: dashboard all non-terminal requests
@@ -1040,7 +1034,7 @@ as $$
     r.flexible_start_time,
     r.flexible_end_time
   from public.requests r
-  where r.status not in ('completed', 'cancelled', 'expired')
+  where r.status in ('open', 'offered')
   order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
 $$;
 
