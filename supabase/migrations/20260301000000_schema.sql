@@ -13,7 +13,7 @@ set row_security = off;
 -- Extension: required for gen_random_uuid()
 create extension if not exists "pgcrypto" with schema "extensions";
 
--- Table: profiles stores household-level profile metadata and admin flag
+-- Table: profiles stores family-level profile metadata and admin flag
 create table public.profiles (
   id uuid primary key default gen_random_uuid(),
   family_name text,
@@ -44,7 +44,7 @@ create table public.profiles (
 
 create index profiles_is_admin_idx on public.profiles(is_admin);
 
--- Table: requests stores all help requests and their lifecycle state by household
+-- Table: requests stores all help requests and their lifecycle state by family
 create table public.requests (
   id uuid primary key default gen_random_uuid(),
   owner uuid not null references public.profiles(id) on delete cascade,
@@ -95,7 +95,7 @@ create table public.requests (
 create index requests_owner_idx on public.requests(owner);
 create index requests_status_idx on public.requests(status);
 
--- Table: offers stores offers from households to help with open requests
+-- Table: offers stores offers from families to help with open requests
 create table public.offers (
   id uuid primary key default gen_random_uuid(),
   request_id uuid not null references public.requests(id) on delete cascade,
@@ -108,16 +108,16 @@ create table public.offers (
 create index offers_request_id_idx on public.offers(request_id);
 create index offers_user_id_idx on public.offers(user_id);
 
--- Table: household_members maps auth users to shared household profiles
-create table public.household_members (
+-- Table: profile_members maps auth users to shared family profiles
+create table public.profile_members (
   user_id uuid primary key references auth.users(id) on delete cascade,
-  household_id uuid not null references public.profiles(id) on delete cascade,
+  family_id uuid not null references public.profiles(id) on delete cascade,
   created_at timestamptz default now()
 );
 
-create index household_members_household_idx on public.household_members(household_id);
+create index profile_members_family_idx on public.profile_members(family_id);
 
--- Table: ledger_entries stores hour transfers between households
+-- Table: ledger_entries stores hour transfers between families
 create table public.ledger_entries (
   id uuid primary key default gen_random_uuid(),
   request uuid references public.requests(id) on delete cascade,
@@ -133,27 +133,27 @@ create index ledger_from_user_idx on public.ledger_entries(from_user);
 create index ledger_to_user_idx on public.ledger_entries(to_user);
 create index ledger_timestamp_idx on public.ledger_entries("timestamp");
 
--- Function: get or create the current auth user's household profile
-create or replace function public.rpc_current_household_id()
+-- Function: get or create the current auth user's family profile
+create or replace function public.rpc_current_family_id()
 returns uuid
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_household_id uuid;
+  v_family_id uuid;
   v_email text;
 begin
   if auth.uid() is null then
     raise exception 'Not authenticated';
   end if;
 
-  select hm.household_id into v_household_id
-  from public.household_members hm
-  where hm.user_id = auth.uid();
+  select fm.family_id into v_family_id
+  from public.profile_members fm
+  where fm.user_id = auth.uid();
 
-  if v_household_id is not null then
-    return v_household_id;
+  if v_family_id is not null then
+    return v_family_id;
   end if;
 
   select u.email into v_email
@@ -161,15 +161,15 @@ begin
   where u.id = auth.uid();
 
   insert into public.profiles (family_name)
-  values (coalesce(nullif(split_part(v_email, '@', 1), ''), 'New Household'))
-  returning id into v_household_id;
+  values (coalesce(nullif(split_part(v_email, '@', 1), ''), 'New Family'))
+  returning id into v_family_id;
 
-  insert into public.household_members (user_id, household_id)
-  values (auth.uid(), v_household_id)
+  insert into public.profile_members (user_id, family_id)
+  values (auth.uid(), v_family_id)
   on conflict (user_id) do update
-  set household_id = excluded.household_id;
+  set family_id = excluded.family_id;
 
-  return v_household_id;
+  return v_family_id;
 end;
 $$;
 
@@ -182,28 +182,28 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_household_id() as household_id
+    select public.rpc_current_family_id() as family_id
   )
   select exists (
     select 1
     from public.profiles p
     cross join me
-    where p.id = me.household_id
+    where p.id = me.family_id
       and p.is_admin = true
   );
 $$;
 
--- RPC: link an existing auth user email to the current household profile
-create or replace function public.rpc_add_household_member_by_email(p_email text)
+-- RPC: link an existing auth user email to the current family profile
+create or replace function public.rpc_add_family_member_by_email(p_email text)
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_household_id uuid;
+  v_family_id uuid;
   v_target_user_id uuid;
-  v_existing_household uuid;
+  v_existing_family uuid;
 begin
   if auth.uid() is null then
     raise exception 'Not authenticated';
@@ -217,7 +217,7 @@ begin
     raise exception 'Email is required';
   end if;
 
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   select u.id into v_target_user_id
   from auth.users u
@@ -227,23 +227,23 @@ begin
     raise exception 'No auth user found for that email';
   end if;
 
-  select hm.household_id into v_existing_household
-  from public.household_members hm
-  where hm.user_id = v_target_user_id;
+  select fm.family_id into v_existing_family
+  from public.profile_members fm
+  where fm.user_id = v_target_user_id;
 
-  if v_existing_household is not null and v_existing_household <> v_household_id then
-    raise exception 'That email is already linked to a different household';
+  if v_existing_family is not null and v_existing_family <> v_family_id then
+    raise exception 'That email is already linked to a different family';
   end if;
 
-  insert into public.household_members (user_id, household_id)
-  values (v_target_user_id, v_household_id)
+  insert into public.profile_members (user_id, family_id)
+  values (v_target_user_id, v_family_id)
   on conflict (user_id) do update
-  set household_id = excluded.household_id;
+  set family_id = excluded.family_id;
 end;
 $$;
 
--- RPC: list linked login emails for the current household profile
-create or replace function public.rpc_list_my_household_emails()
+-- RPC: list linked login emails for the current family profile
+create or replace function public.rpc_list_my_family_emails()
 returns table (email text)
 language sql
 stable
@@ -251,9 +251,9 @@ security definer
 set search_path = public
 as $$
   select u.email
-  from public.household_members hm
-  join auth.users u on u.id = hm.user_id
-  where hm.household_id = public.rpc_current_household_id()
+  from public.profile_members fm
+  join auth.users u on u.id = fm.user_id
+  where fm.family_id = public.rpc_current_family_id()
   order by u.email;
 $$;
 
@@ -374,9 +374,9 @@ as $$
 declare
   v_id uuid;
   v_hours numeric;
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   if p_request_type not in ('babysit', 'drive', 'favor') then
     raise exception 'Invalid request type';
@@ -437,7 +437,7 @@ begin
     status
   )
   values (
-    v_household_id,
+    v_family_id,
     p_request_type,
     p_notes,
     coalesce(p_flexible_date, false),
@@ -489,9 +489,9 @@ as $$
 declare
   v_request_type text;
   v_hours numeric;
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   if p_notes is null or btrim(p_notes) = '' then
     raise exception 'Description is required';
@@ -500,7 +500,7 @@ begin
   select request_type into v_request_type
   from public.requests
   where id = p_request_id
-    and owner = v_household_id
+    and owner = v_family_id
     and status = 'open';
 
   if not found then
@@ -569,9 +569,9 @@ set search_path = public
 as $$
 declare
   v_request public.requests%rowtype;
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   select * into v_request
   from public.requests
@@ -581,7 +581,7 @@ begin
     raise exception 'Request not found';
   end if;
 
-  if v_request.owner = v_household_id then
+  if v_request.owner = v_family_id then
     raise exception 'Owner cannot offer on own request';
   end if;
 
@@ -590,7 +590,7 @@ begin
   end if;
 
   insert into public.offers (request_id, user_id, comment)
-  values (p_request_id, v_household_id, p_comment)
+  values (p_request_id, v_family_id, p_comment)
   on conflict (request_id, user_id) do nothing;
 
   update public.requests
@@ -614,9 +614,9 @@ declare
   v_owner uuid;
   v_offer_user uuid;
   v_status text;
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   select owner, status into v_owner, v_status
   from public.requests
@@ -626,7 +626,7 @@ begin
     raise exception 'Request not found';
   end if;
 
-  if v_owner <> v_household_id then
+  if v_owner <> v_family_id then
     raise exception 'Only owner can select winner';
   end if;
 
@@ -661,9 +661,9 @@ declare
   v_owner uuid;
   v_accepted_by uuid;
   v_status text;
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   select owner, accepted_by, status into v_owner, v_accepted_by, v_status
   from public.requests
@@ -677,7 +677,7 @@ begin
     raise exception 'Only assigned requests can be completed';
   end if;
 
-  if v_household_id <> v_owner and v_household_id <> v_accepted_by then
+  if v_family_id <> v_owner and v_family_id <> v_accepted_by then
     raise exception 'Not allowed to complete this request';
   end if;
 
@@ -695,15 +695,15 @@ security definer
 set search_path = public
 as $$
 declare
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   update public.requests
   set status = 'cancelled',
       accepted_by = null
   where id = p_request_id
-    and owner = v_household_id
+    and owner = v_family_id
     and status in ('open', 'offered', 'assigned');
 
   if not found then
@@ -721,12 +721,12 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_household_id() as household_id
+    select public.rpc_current_family_id() as family_id
   )
   select coalesce(sum(
     case
-      when le.to_user = me.household_id then le.hours
-      when le.from_user = me.household_id then -le.hours
+      when le.to_user = me.family_id then le.hours
+      when le.from_user = me.family_id then -le.hours
       else 0
     end
   ), 0)
@@ -755,7 +755,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_household_id() as household_id
+    select public.rpc_current_family_id() as family_id
   )
   select
     r.id,
@@ -771,7 +771,7 @@ as $$
     r.flexible_end_time
   from public.requests r
   cross join me
-  where r.owner = me.household_id
+  where r.owner = me.family_id
     and (
       (r.end_time is not null and r.end_time >= now())
       or (r.end_time is null and r.request_date is not null and r.request_date >= current_date)
@@ -801,7 +801,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_household_id() as household_id
+    select public.rpc_current_family_id() as family_id
   )
   select
     r.id,
@@ -819,7 +819,7 @@ as $$
   from public.requests r
   cross join me
   where r.status = 'open'
-    and r.owner <> me.household_id
+    and r.owner <> me.family_id
     and (
       (r.end_time is not null and r.end_time >= now())
       or (r.end_time is null and r.request_date is not null and r.request_date >= current_date)
@@ -836,14 +836,14 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_household_id() as household_id
+    select public.rpc_current_family_id() as family_id
   )
   select exists (
     select 1
     from public.ledger_entries le
     join public.requests r on r.id = le.request
     cross join me
-    where le.from_user = me.household_id
+    where le.from_user = me.family_id
       and r.request_type = 'babysit'
       and le.timestamp >= date_trunc('month', now())
       and le.timestamp < date_trunc('month', now()) + interval '1 month'
@@ -884,7 +884,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_household_id() as household_id
+    select public.rpc_current_family_id() as family_id
   )
   select
     p.id,
@@ -913,7 +913,7 @@ as $$
     p.is_admin
   from public.profiles p
   cross join me
-  where p.id = me.household_id;
+  where p.id = me.family_id;
 $$;
 
 -- RPC: upsert current user's profile details and notification preferences
@@ -948,9 +948,9 @@ set search_path = public
 as $$
 declare
   v_is_admin boolean;
-  v_household_id uuid;
+  v_family_id uuid;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   v_is_admin := public.rpc_is_admin();
 
@@ -980,7 +980,7 @@ begin
     admin_general_notes
   )
   values (
-    v_household_id,
+    v_family_id,
     p_family_name,
     p_phone,
     p_parent_member_names,
@@ -1159,11 +1159,11 @@ as $$
 declare
   v_id uuid;
   v_is_admin boolean;
-  v_household_id uuid;
+  v_family_id uuid;
   v_to_user uuid;
   v_timestamp timestamptz;
 begin
-  v_household_id := public.rpc_current_household_id();
+  v_family_id := public.rpc_current_family_id();
 
   v_is_admin := public.rpc_is_admin();
 
@@ -1171,10 +1171,10 @@ begin
     v_to_user := p_to_user;
     v_timestamp := coalesce(p_timestamp, now());
   else
-    if p_to_user <> v_household_id then
+    if p_to_user <> v_family_id then
       raise exception 'Non-admin entries must use yourself as recipient';
     end if;
-    v_to_user := v_household_id;
+    v_to_user := v_family_id;
     v_timestamp := now();
   end if;
 
@@ -1269,9 +1269,9 @@ grant all on all functions in schema public to service_role;
 grant execute on function public.rpc_list_requests() to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
-grant execute on function public.rpc_current_household_id() to authenticated, service_role;
-grant execute on function public.rpc_add_household_member_by_email(text) to authenticated, service_role;
-grant execute on function public.rpc_list_my_household_emails() to authenticated, service_role;
+grant execute on function public.rpc_current_family_id() to authenticated, service_role;
+grant execute on function public.rpc_add_family_member_by_email(text) to authenticated, service_role;
+grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_create_request(text, text, boolean, boolean, boolean, date, timestamptz, timestamptz, numeric, text, boolean, boolean, boolean, text, text, text) to authenticated, service_role;
 grant execute on function public.rpc_update_request(uuid, date, boolean, boolean, boolean, timestamptz, timestamptz, text, numeric, text, boolean, boolean, boolean, text, text, text) to authenticated, service_role;
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
