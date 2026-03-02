@@ -53,8 +53,8 @@ create table public.family_children (
   family_id uuid not null references public.families(id) on delete cascade,
   name text not null,
   date_of_birth date,
-  dietary_restrictions text,
-  pet_issues text
+  allergies text,
+  notes text
 );
 
 create index family_children_family_idx on public.family_children(family_id);
@@ -388,15 +388,15 @@ returns table (
   id uuid,
   name text,
   date_of_birth date,
-  dietary_restrictions text,
-  pet_issues text
+  allergies text,
+  notes text
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select fc.id, fc.name, fc.date_of_birth, fc.dietary_restrictions, fc.pet_issues
+  select fc.id, fc.name, fc.date_of_birth, fc.allergies, fc.notes
   from public.family_children fc
   where fc.family_id = public.rpc_get_family_id()
   order by fc.date_of_birth asc, fc.id asc;
@@ -421,8 +421,8 @@ begin
     family_id,
     name,
     date_of_birth,
-    dietary_restrictions,
-    pet_issues
+    allergies,
+    notes
   )
   select
     v_family_id,
@@ -431,8 +431,8 @@ begin
       when nullif(child->>'date_of_birth', '') is null then null
       else to_date((child->>'date_of_birth') || '-15', 'YYYY-MM-DD')
     end as date_of_birth,
-    nullif(btrim(child->>'dietary_restrictions'), '') as dietary_restrictions,
-    nullif(btrim(child->>'pet_issues'), '') as pet_issues
+    nullif(btrim(child->>'allergies'), '') as allergies,
+    nullif(btrim(child->>'notes'), '') as notes
   from jsonb_array_elements(coalesce(p_children, '[]'::jsonb)) as child
   where btrim(coalesce(child->>'name', '')) <> '';
 end;
@@ -447,6 +447,7 @@ returns table (
   date date,
   type text,
   status text,
+  family_name text,
   notes text,
   hours numeric
 )
@@ -458,8 +459,9 @@ begin
   perform public.rpc_refresh_request_statuses();
 
   return query
-  select r.id, r.start_time, r.end_time, r.date, r.type, r.status, r.notes, r.hours
+  select r.id, r.start_time, r.end_time, r.date, r.type, r.status, f.name as family_name, r.notes, r.hours
   from public.requests r
+  join public.families f on f.id = r.requester_family_id
   order by r.date asc nulls first
      ,r.start_time asc nulls first
      ,r.id;
@@ -490,15 +492,15 @@ returns table (
   id uuid,
   name text,
   date_of_birth date,
-  dietary_restrictions text,
-  pet_issues text
+  allergies text,
+  notes text
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select fc.id, fc.name, fc.date_of_birth, fc.dietary_restrictions, fc.pet_issues
+  select fc.id, fc.name, fc.date_of_birth, fc.allergies, fc.notes
   from public.request_children rc
   join public.family_children fc on fc.id = rc.child_id
   where rc.request_id = p_request_id
@@ -1192,6 +1194,7 @@ returns table (
   date date,
   type text,
   status text,
+  family_name text,
   notes text,
   hours numeric,
   flexible_date boolean,
@@ -1216,12 +1219,14 @@ begin
     r.date,
     r.type,
     r.status,
+    f.name as family_name,
     r.notes,
     r.hours,
     r.flexible_date,
     r.flexible_start_time,
     r.flexible_end_time
   from public.requests r
+  join public.families f on f.id = r.requester_family_id
   cross join me
   where r.requester_family_id = me.family_id
     and r.status not in ('completed', 'cancelled', 'expired')
@@ -1246,6 +1251,7 @@ returns table (
   date date,
   type text,
   status text,
+  family_name text,
   notes text,
   hours numeric,
   flexible_date boolean,
@@ -1271,12 +1277,14 @@ begin
     r.date,
     r.type,
     r.status,
+    f.name as family_name,
     r.notes,
     r.hours,
     r.flexible_date,
     r.flexible_start_time,
     r.flexible_end_time
   from public.requests r
+  join public.families f on f.id = r.requester_family_id
   cross join me
   where r.status in ('open', 'offered')
     and r.requester_family_id <> me.family_id
@@ -1302,6 +1310,7 @@ returns table (
   date date,
   type text,
   status text,
+  family_name text,
   notes text,
   hours numeric,
   flexible_date boolean,
@@ -1328,6 +1337,7 @@ begin
     r.date as date,
     r.type as type,
     r.status,
+    f.name as family_name,
     r.notes,
     r.hours,
     r.flexible_date,
@@ -1336,6 +1346,7 @@ begin
     o.created_at as offer_created_at
   from public.offers o
   join public.requests r on r.id = o.request_id
+  join public.families f on f.id = r.requester_family_id
   cross join me
   where o.family_id = me.family_id
     and r.requester_family_id <> me.family_id
