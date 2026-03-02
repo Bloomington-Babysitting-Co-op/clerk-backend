@@ -64,9 +64,10 @@ create index family_children_date_of_birth_idx on public.family_children(date_of
 create table public.requests (
   id uuid primary key default gen_random_uuid(),
   requester_family_id uuid not null references public.families(id) on delete cascade,
-  request_type text not null,
+  status text not null,
+  type text not null,
   notes text,
-  request_date date,
+  date date,
   start_time timestamptz,
   end_time timestamptz,
   flexible_date boolean not null default false,
@@ -79,7 +80,6 @@ create table public.requests (
   sitters_children_welcome boolean not null default false,
   origin text,
   destination text,
-  status text not null,
   assignee_family_id uuid references public.families(id),
   created_at timestamptz default now(),
   constraint requests_status_check check (
@@ -91,7 +91,7 @@ create table public.requests (
     or (status = 'completed'::text)
   ),
   constraint requests_request_type_check check (
-    request_type = any (array['babysit'::text, 'drive'::text, 'favor'::text])
+    type = any (array['babysit'::text, 'drive'::text, 'favor'::text])
   ),
   constraint requests_sit_location_check check (
     sit_location is null or sit_location = any (array['sitter_house'::text, 'requester_house'::text, 'either'::text])
@@ -125,7 +125,7 @@ create table public.offers (
   id uuid primary key default gen_random_uuid(),
   request_id uuid not null references public.requests(id) on delete cascade,
   family_id uuid not null references public.families(id),
-  comment text,
+  notes text,
   created_at timestamptz not null default now(),
   unique (request_id, family_id)
 );
@@ -149,7 +149,7 @@ create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
 create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_entry_date_idx on public.ledger_entries(entry_date);
 
--- Function: refresh request statuses based on request_date lifecycle
+-- Function: refresh request statuses based on date lifecycle
 create or replace function public.rpc_refresh_request_statuses()
 returns void
 language plpgsql
@@ -160,18 +160,18 @@ begin
   update public.requests
   set status = 'expired',
       assignee_family_id = null
-  where request_date < current_date
+  where date < current_date
     and status in ('open', 'offered');
 
   update public.requests
   set status = 'completed'
-  where request_date < current_date
+  where date < current_date
     and status = 'assigned';
 end;
 $$;
 
 -- Function: get or create the current auth user's family id
-create or replace function public.rpc_current_family_id()
+create or replace function public.rpc_get_family_id()
 returns uuid
 language plpgsql
 security definer
@@ -211,7 +211,7 @@ end;
 $$;
 
 -- RPC: whether current user is an admin
-create or replace function public.rpc_is_admin()
+create or replace function public.rpc_get_admin_status()
 returns boolean
 language sql
 stable
@@ -219,7 +219,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select exists (
     select 1
@@ -246,7 +246,7 @@ begin
     raise exception 'Not authenticated';
   end if;
 
-  if not public.rpc_is_admin() then
+  if not public.rpc_get_admin_status() then
     raise exception 'Admin only';
   end if;
 
@@ -254,7 +254,7 @@ begin
     raise exception 'Email is required';
   end if;
 
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   select u.id into v_target_user_id
   from auth.users u
@@ -290,7 +290,7 @@ as $$
   select u.email
   from public.family_parents fm
   join auth.users u on u.id = fm.user_id
-  where fm.family_id = public.rpc_current_family_id()
+  where fm.family_id = public.rpc_get_family_id()
   order by u.email;
 $$;
 
@@ -343,7 +343,7 @@ as $$
 declare
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   insert into public.family_parents (
     user_id,
@@ -398,7 +398,7 @@ set search_path = public
 as $$
   select fc.id, fc.name, fc.date_of_birth, fc.dietary_restrictions, fc.pet_issues
   from public.family_children fc
-  where fc.family_id = public.rpc_current_family_id()
+  where fc.family_id = public.rpc_get_family_id()
   order by fc.date_of_birth asc, fc.id asc;
 $$;
 
@@ -412,7 +412,7 @@ as $$
 declare
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   delete from public.family_children
   where family_id = v_family_id;
@@ -444,8 +444,8 @@ returns table (
   id uuid,
   start_time timestamptz,
   end_time timestamptz,
-  request_date date,
-  request_type text,
+  date date,
+  type text,
   status text,
   notes text,
   hours numeric
@@ -458,9 +458,11 @@ begin
   perform public.rpc_refresh_request_statuses();
 
   return query
-  select r.id, r.start_time, r.end_time, r.request_date, r.request_type, r.status, r.notes, r.hours
+  select r.id, r.start_time, r.end_time, r.date, r.type, r.status, r.notes, r.hours
   from public.requests r
-  order by coalesce(r.start_time, r.request_date::timestamptz) asc;
+  order by r.date asc nulls first
+     ,r.start_time asc nulls first
+     ,r.id;
 end;
 $$;
 
@@ -512,7 +514,7 @@ returns table (
   family_name text,
   hours_balance numeric,
   has_used_this_month boolean,
-  comment text,
+  notes text,
   created_at timestamptz
 )
 language sql
@@ -541,7 +543,7 @@ as $$
       true as has_used_this_month
     from public.ledger_entries le
     join public.requests r on r.id = le.request_id
-    where r.request_type = 'babysit'
+    where r.type = 'babysit'
       and le.entry_date >= date_trunc('month', now())
       and le.entry_date < date_trunc('month', now()) + interval '1 month'
     group by le.from_family_id
@@ -553,21 +555,25 @@ as $$
     f.name as family_name,
     coalesce(b.hours_balance, 0) as hours_balance,
     coalesce(mu.has_used_this_month, false) as has_used_this_month,
-    o.comment,
+    o.notes,
     o.created_at
   from public.offers o
   join public.families f on f.id = o.family_id
   left join balances b on b.family_id = o.family_id
   left join monthly_usage mu on mu.family_id = o.family_id
   where o.request_id = p_request_id
-  order by o.created_at desc;
+  order by
+    coalesce(mu.has_used_this_month, false) asc,
+    coalesce(b.hours_balance, 0) asc,
+    o.created_at asc,
+    o.id asc;
 $$;
 
 -- RPC: create a new request
 create or replace function public.rpc_create_request(
-  p_request_type text,
+  p_type text,
   p_notes text,
-  p_request_date date default null,
+  p_date date default null,
   p_start_time timestamptz default null,
   p_end_time timestamptz default null,
   p_flexible_date boolean default false,
@@ -592,11 +598,11 @@ declare
   v_hours numeric;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
-  if p_request_type not in ('babysit', 'drive', 'favor') then
+  if p_type not in ('babysit', 'drive', 'favor') then
     raise exception 'Invalid request type';
   end if;
 
@@ -604,11 +610,11 @@ begin
     raise exception 'Description is required';
   end if;
 
-  if p_request_date is null then
+  if p_date is null then
     raise exception 'Request date is required';
   end if;
 
-  if p_request_date is not null and p_request_date < current_date then
+  if p_date is not null and p_date < current_date then
     raise exception 'Request date cannot be in the past';
   end if;
 
@@ -622,7 +628,7 @@ begin
 
   v_hours := p_hours;
 
-  if p_request_type = 'babysit' and p_start_time is not null and p_end_time is not null then
+  if p_type = 'babysit' and p_start_time is not null and p_end_time is not null then
     v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
   end if;
 
@@ -632,9 +638,9 @@ begin
 
   insert into public.requests (
     requester_family_id,
-    request_type,
+    type,
     notes,
-    request_date,
+    date,
     start_time,
     end_time,
     flexible_date,
@@ -651,9 +657,9 @@ begin
   )
   values (
     v_family_id,
-    p_request_type,
+    p_type,
     p_notes,
-    p_request_date,
+    p_date,
     p_start_time,
     p_end_time,
     coalesce(p_flexible_date, false),
@@ -664,13 +670,13 @@ begin
     coalesce(p_meal_required, false),
     coalesce(p_meal_prepared_by_sitter, false),
     coalesce(p_sitters_children_welcome, false),
-    case when p_request_type = 'drive' then p_origin else null end,
-    case when p_request_type = 'drive' then p_destination else null end,
+    case when p_type = 'drive' then p_origin else null end,
+    case when p_type = 'drive' then p_destination else null end,
     'open'
   )
   returning id into v_id;
 
-  if p_request_type = 'babysit' and coalesce(array_length(p_child_ids, 1), 0) > 0 then
+  if p_type = 'babysit' and coalesce(array_length(p_child_ids, 1), 0) > 0 then
     if exists (
       select 1
       from unnest(p_child_ids) as child_id
@@ -698,7 +704,7 @@ $$;
 create or replace function public.rpc_update_request(
   p_request_id uuid,
   p_notes text default null,
-  p_request_date date default null,
+  p_date date default null,
   p_start_time timestamptz default null,
   p_end_time timestamptz default null,
   p_flexible_date boolean default false,
@@ -723,7 +729,7 @@ declare
   v_hours numeric;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -731,7 +737,7 @@ begin
     raise exception 'Description is required';
   end if;
 
-  select request_type into v_request_type
+  select type into v_request_type
   from public.requests
   where id = p_request_id
     and requester_family_id = v_family_id
@@ -741,11 +747,11 @@ begin
     raise exception 'Request not found or not editable';
   end if;
 
-  if p_request_date is null then
+  if p_date is null then
     raise exception 'Request date is required';
   end if;
 
-  if p_request_date is not null and p_request_date < current_date then
+  if p_date is not null and p_date < current_date then
     raise exception 'Request date cannot be in the past';
   end if;
 
@@ -769,7 +775,7 @@ begin
 
   update public.requests
     set notes = p_notes,
-      request_date = p_request_date,
+      date = p_date,
       start_time = p_start_time,
       end_time = p_end_time,
       flexible_date = coalesce(p_flexible_date, false),
@@ -812,7 +818,7 @@ $$;
 -- RPC: submit an offer on a request
 create or replace function public.rpc_offer_request(
   p_request_id uuid,
-  p_comment text default null
+  p_notes text default null
 )
 returns void
 language plpgsql
@@ -823,7 +829,7 @@ declare
   v_request public.requests%rowtype;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -843,8 +849,8 @@ begin
     raise exception 'Request cannot be offered in current status';
   end if;
 
-  insert into public.offers (request_id, family_id, comment)
-  values (p_request_id, v_family_id, p_comment)
+  insert into public.offers (request_id, family_id, notes)
+  values (p_request_id, v_family_id, p_notes)
   on conflict (request_id, family_id) do nothing;
 
   update public.requests
@@ -857,7 +863,7 @@ $$;
 -- RPC: edit a submitted offer owned by current family
 create or replace function public.rpc_update_offer(
   p_offer_id uuid,
-  p_comment text default null
+  p_notes text default null
 )
 returns void
 language plpgsql
@@ -872,7 +878,7 @@ declare
   v_request_status text;
   v_assignee_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   select o.request_id, o.family_id
   into v_offer_request_id, v_offer_family_id
@@ -905,7 +911,7 @@ begin
   end if;
 
   update public.offers
-  set comment = p_comment
+  set notes = p_notes
   where id = p_offer_id;
 end;
 $$;
@@ -926,7 +932,7 @@ declare
   v_requester_family_id uuid;
   v_request_status text;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -993,7 +999,7 @@ end;
 $$;
 
 -- RPC: requester selects the winning offer and assigns request
-create or replace function public.rpc_select_request_winner(
+create or replace function public.rpc_request_set_assignee(
   p_request_id uuid,
   p_offer_id uuid
 )
@@ -1008,7 +1014,7 @@ declare
   v_status text;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -1057,7 +1063,7 @@ declare
   v_status text;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -1093,7 +1099,7 @@ as $$
 declare
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
   update public.requests
   set status = 'cancelled',
@@ -1117,7 +1123,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select coalesce(sum(
     case
@@ -1131,13 +1137,13 @@ as $$
 $$;
 
 -- RPC: dashboard active requests created by current user
-create or replace function public.rpc_list_user_future_requests()
+create or replace function public.rpc_list_requests_my_family_future()
 returns table (
   id uuid,
   start_time timestamptz,
   end_time timestamptz,
-  request_date date,
-  request_type text,
+  date date,
+  type text,
   status text,
   notes text,
   hours numeric,
@@ -1154,14 +1160,14 @@ begin
 
   return query
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select
     r.id,
     r.start_time,
     r.end_time,
-    r.request_date,
-    r.request_type,
+    r.date,
+    r.type,
     r.status,
     r.notes,
     r.hours,
@@ -1174,22 +1180,24 @@ begin
     and r.status not in ('completed', 'cancelled', 'expired')
     and (
       (r.end_time is not null and r.end_time >= now())
-      or (r.end_time is null and r.request_date is not null and r.request_date >= current_date)
-      or (r.request_date is null and coalesce(r.flexible_date, false))
+      or (r.end_time is null and r.date is not null and r.date >= current_date)
+      or (r.date is null and coalesce(r.flexible_date, false))
     )
-  order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
+  order by r.date asc nulls first
+     ,r.start_time asc nulls first
+     ,r.id;
 end;
 $$;
 
--- RPC: dashboard all non-terminal requests
-create or replace function public.rpc_list_open_other_requests()
+-- RPC: dashboard all non-terminal unassigned requests
+create or replace function public.rpc_list_requests_other_open()
 returns table (
   id uuid,
   requester_family_id uuid,
   start_time timestamptz,
   end_time timestamptz,
-  request_date date,
-  request_type text,
+  date date,
+  type text,
   status text,
   notes text,
   hours numeric,
@@ -1206,15 +1214,15 @@ begin
 
   return query
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select
     r.id,
     r.requester_family_id,
     r.start_time,
     r.end_time,
-    r.request_date,
-    r.request_type,
+    r.date,
+    r.type,
     r.status,
     r.notes,
     r.hours,
@@ -1231,19 +1239,21 @@ begin
       where o.request_id = r.id
         and o.family_id = me.family_id
     )
-  order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
+  order by r.date asc nulls first
+     ,r.start_time asc nulls first
+     ,r.id;
 end;
 $$;
 
 -- RPC: dashboard requests from other families that current family has submitted offers on
-create or replace function public.rpc_list_my_submitted_offers()
+create or replace function public.rpc_list_offers_my_submitted()
 returns table (
   id uuid,
   requester_family_id uuid,
   start_time timestamptz,
   end_time timestamptz,
-  request_date date,
-  request_type text,
+  date date,
+  type text,
   status text,
   notes text,
   hours numeric,
@@ -1261,15 +1271,15 @@ begin
 
   return query
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select
     r.id,
     r.requester_family_id,
     r.start_time,
     r.end_time,
-    r.request_date,
-    r.request_type,
+    r.date as date,
+    r.type as type,
     r.status,
     r.notes,
     r.hours,
@@ -1283,7 +1293,10 @@ begin
   where o.family_id = me.family_id
     and r.requester_family_id <> me.family_id
     and r.status not in ('completed', 'cancelled', 'expired')
-  order by o.created_at desc, r.id;
+  order by r.date asc nulls first
+    ,r.start_time asc nulls first
+    ,o.created_at desc
+    ,r.id;
 end;
 $$;
 
@@ -1296,7 +1309,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select exists (
     select 1
@@ -1304,7 +1317,7 @@ as $$
     join public.requests r on r.id = le.request_id
     cross join me
     where le.from_family_id = me.family_id
-      and r.request_type = 'babysit'
+      and r.type = 'babysit'
       and le.entry_date >= date_trunc('month', now())
       and le.entry_date < date_trunc('month', now()) + interval '1 month'
   );
@@ -1332,7 +1345,7 @@ security definer
 set search_path = public
 as $$
   with me as (
-    select public.rpc_current_family_id() as family_id
+    select public.rpc_get_family_id() as family_id
   )
   select
     p.id,
@@ -1375,7 +1388,7 @@ declare
   v_family_id uuid;
   v_emergency_contacts jsonb;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
   v_emergency_contacts := p_emergency_contacts;
 
   if v_emergency_contacts is not null then
@@ -1394,7 +1407,7 @@ begin
     end if;
   end if;
 
-  v_is_admin := public.rpc_is_admin();
+  v_is_admin := public.rpc_get_admin_status();
 
   insert into public.families (
     id,
@@ -1499,7 +1512,7 @@ as $$
 $$;
 
 -- RPC: list completed sits for prefill in manual entry flow
-create or replace function public.rpc_list_completed_sits_for_prefill()
+create or replace function public.rpc_list_requests_completed_for_prefill()
 returns table (
   request_id uuid,
   from_family_id uuid,
@@ -1569,9 +1582,9 @@ declare
   v_to_family_id uuid;
   v_entry_date timestamptz;
 begin
-  v_family_id := public.rpc_current_family_id();
+  v_family_id := public.rpc_get_family_id();
 
-  v_is_admin := public.rpc_is_admin();
+  v_is_admin := public.rpc_get_admin_status();
 
   if v_is_admin then
     v_to_family_id := p_to_family_id;
@@ -1634,7 +1647,7 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.rpc_is_admin() then
+  if not public.rpc_get_admin_status() then
     raise exception 'Admin only';
   end if;
 
@@ -1676,7 +1689,7 @@ grant execute on function public.rpc_list_requests() to authenticated, service_r
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
-grant execute on function public.rpc_current_family_id() to authenticated, service_role;
+grant execute on function public.rpc_get_family_id() to authenticated, service_role;
 grant execute on function public.rpc_add_family_member_by_email(text) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
@@ -1688,20 +1701,20 @@ grant execute on function public.rpc_update_request(uuid, text, date, timestampt
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
-grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
+grant execute on function public.rpc_request_set_assignee(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
-grant execute on function public.rpc_list_user_future_requests() to authenticated, service_role;
-grant execute on function public.rpc_list_open_other_requests() to authenticated, service_role;
-grant execute on function public.rpc_list_my_submitted_offers() to authenticated, service_role;
+grant execute on function public.rpc_list_requests_my_family_future() to authenticated, service_role;
+grant execute on function public.rpc_list_requests_other_open() to authenticated, service_role;
+grant execute on function public.rpc_list_offers_my_submitted() to authenticated, service_role;
 grant execute on function public.rpc_has_completed_sit_this_month() to authenticated, service_role;
-grant execute on function public.rpc_is_admin() to authenticated, service_role;
+grant execute on function public.rpc_get_admin_status() to authenticated, service_role;
 grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
 grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text, date, date, date, text) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
-grant execute on function public.rpc_list_completed_sits_for_prefill() to authenticated, service_role;
+grant execute on function public.rpc_list_requests_completed_for_prefill() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, timestamptz) to authenticated, service_role;
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
