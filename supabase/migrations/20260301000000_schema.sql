@@ -1620,6 +1620,79 @@ as $$
   order by p.name nulls last, p.id;
 $$;
 
+-- RPC: list full family card details for families page
+create or replace function public.rpc_list_families_full()
+returns table (
+  family_id uuid,
+  family_name text,
+  address text,
+  parents jsonb,
+  emergency_contacts jsonb,
+  children jsonb,
+  pets text,
+  family_photo_url text,
+  business_information text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with parent_rows as (
+    select
+      fp.family_id,
+      fp.name,
+      fp.phone,
+      u.email
+    from public.family_parents fp
+    left join auth.users u on u.id = fp.user_id
+  ),
+  parent_json as (
+    select
+      pr.family_id,
+      jsonb_agg(
+        jsonb_build_object(
+          'name', pr.name,
+          'email', pr.email,
+          'phone', pr.phone
+        )
+        order by lower(coalesce(pr.name, '')), lower(coalesce(pr.email, ''))
+      ) as parents
+    from parent_rows pr
+    group by pr.family_id
+  ),
+  child_json as (
+    select
+      fc.family_id,
+      jsonb_agg(
+        jsonb_build_object(
+          'id', fc.id,
+          'name', fc.name,
+          'date_of_birth', fc.date_of_birth,
+          'allergies', fc.allergies,
+          'notes', fc.notes
+        )
+        order by lower(coalesce(fc.name, '')), fc.id
+      ) as children
+    from public.family_children fc
+    group by fc.family_id
+  )
+  select
+    f.id as family_id,
+    f.name as family_name,
+    f.address,
+    coalesce(pj.parents, '[]'::jsonb) as parents,
+    coalesce(f.emergency_contacts, '[]'::jsonb) as emergency_contacts,
+    coalesce(cj.children, '[]'::jsonb) as children,
+    f.pets,
+    f.family_photo_url,
+    f.business_information
+  from public.families f
+  left join parent_json pj on pj.family_id = f.id
+  left join child_json cj on cj.family_id = f.id
+  order by lower(coalesce(f.name, '')), f.id;
+$$;
+
 -- RPC: create manual ledger entry (admin unrestricted, non-admin to self only)
 create or replace function public.rpc_create_manual_ledger_entry(
   p_from_family_id uuid,
@@ -1775,6 +1848,7 @@ grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
 grant execute on function public.rpc_list_requests_completed_for_prefill() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
+grant execute on function public.rpc_list_families_full() to authenticated, service_role;
 grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, timestamptz) to authenticated, service_role;
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
 grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
