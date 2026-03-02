@@ -13,6 +13,37 @@ set row_security = off;
 -- Extension: required for gen_random_uuid()
 create extension if not exists "pgcrypto" with schema "extensions";
 
+-- Table: profiles stores household-level profile metadata and admin flag
+create table public.profiles (
+  id uuid primary key default gen_random_uuid(),
+  family_name text,
+  phone text,
+  parent_member_names text,
+  member_emails text,
+  member_phones text,
+  address text,
+  emergency_contact_names text,
+  emergency_contact_phones text,
+  children_details text,
+  pets text,
+  family_photo_url text,
+  business_information text,
+  notify_new_request boolean not null default false,
+  notify_unoffered_48h boolean not null default false,
+  notify_request_offered boolean not null default false,
+  notify_offer_cancelled_or_edited boolean not null default false,
+  notify_ledger_debtor boolean not null default false,
+  notify_midmonth_inactive boolean not null default false,
+  admin_date_joined date,
+  admin_last_background_check date,
+  admin_last_dues_payment date,
+  admin_general_notes text,
+  is_admin boolean default false,
+  created_at timestamptz default now()
+);
+
+create index profiles_is_admin_idx on public.profiles(is_admin);
+
 -- Table: requests stores all help requests and their lifecycle state by household
 create table public.requests (
   id uuid primary key default gen_random_uuid(),
@@ -77,37 +108,6 @@ create table public.offers (
 create index offers_request_id_idx on public.offers(request_id);
 create index offers_user_id_idx on public.offers(user_id);
 
--- Table: profiles stores household-level profile metadata and admin flag
-create table public.profiles (
-  id uuid primary key default gen_random_uuid(),
-  family_name text,
-  phone text,
-  parent_member_names text,
-  member_emails text,
-  member_phones text,
-  address text,
-  emergency_contact_names text,
-  emergency_contact_phones text,
-  children_details text,
-  pets text,
-  family_photo_url text,
-  business_information text,
-  notify_new_request boolean not null default false,
-  notify_unoffered_48h boolean not null default false,
-  notify_request_offered boolean not null default false,
-  notify_offer_cancelled_or_edited boolean not null default false,
-  notify_ledger_debtor boolean not null default false,
-  notify_midmonth_inactive boolean not null default false,
-  admin_date_joined date,
-  admin_last_background_check date,
-  admin_last_dues_payment date,
-  admin_general_notes text,
-  is_admin boolean default false,
-  created_at timestamptz default now()
-);
-
-create index profiles_is_admin_idx on public.profiles(is_admin);
-
 -- Table: household_members maps auth users to shared household profiles
 create table public.household_members (
   user_id uuid primary key references auth.users(id) on delete cascade,
@@ -171,6 +171,26 @@ begin
 
   return v_household_id;
 end;
+$$;
+
+-- RPC: whether current user is an admin
+create or replace function public.rpc_is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (
+    select public.rpc_current_household_id() as household_id
+  )
+  select exists (
+    select 1
+    from public.profiles p
+    cross join me
+    where p.id = me.household_id
+      and p.is_admin = true
+  );
 $$;
 
 -- RPC: link an existing auth user email to the current household profile
@@ -827,26 +847,6 @@ as $$
       and r.request_type = 'babysit'
       and le.timestamp >= date_trunc('month', now())
       and le.timestamp < date_trunc('month', now()) + interval '1 month'
-  );
-$$;
-
--- RPC: whether current user is an admin
-create or replace function public.rpc_is_admin()
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  with me as (
-    select public.rpc_current_household_id() as household_id
-  )
-  select exists (
-    select 1
-    from public.profiles p
-    cross join me
-    where p.id = me.household_id
-      and p.is_admin = true
   );
 $$;
 
