@@ -931,6 +931,7 @@ declare
   v_offer_family_id uuid;
   v_requester_family_id uuid;
   v_request_status text;
+  v_assignee_family_id uuid;
 begin
   v_family_id := public.rpc_get_family_id();
 
@@ -949,8 +950,8 @@ begin
     raise exception 'Only the offering family can cancel this offer';
   end if;
 
-  select r.requester_family_id, r.status
-  into v_requester_family_id, v_request_status
+  select r.requester_family_id, r.status, r.assignee_family_id
+  into v_requester_family_id, v_request_status, v_assignee_family_id
   from public.requests r
   where r.id = v_offer_request_id;
 
@@ -995,6 +996,52 @@ begin
         and status = 'assigned';
     end if;
   end if;
+end;
+$$;
+
+-- RPC: requester clears accepted assignee and reopens offer state
+create or replace function public.rpc_request_clear_assignee(
+  p_request_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+  v_requester_family_id uuid;
+  v_status text;
+begin
+  v_family_id := public.rpc_get_family_id();
+
+  perform public.rpc_refresh_request_statuses();
+
+  select requester_family_id, status
+  into v_requester_family_id, v_status
+  from public.requests
+  where id = p_request_id;
+
+  if not found then
+    raise exception 'Request not found';
+  end if;
+
+  if v_requester_family_id <> v_family_id then
+    raise exception 'Only requester can clear accepted offer';
+  end if;
+
+  if v_status <> 'assigned' then
+    raise exception 'Only assigned requests can clear accepted offer';
+  end if;
+
+  update public.requests
+  set status = case
+        when exists (select 1 from public.offers o where o.request_id = p_request_id) then 'offered'
+        else 'open'
+      end,
+      assignee_family_id = null
+  where id = p_request_id
+    and status = 'assigned';
 end;
 $$;
 
@@ -1702,6 +1749,7 @@ grant execute on function public.rpc_offer_request(uuid, text) to authenticated,
 grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
 grant execute on function public.rpc_request_set_assignee(uuid, uuid) to authenticated, service_role;
+grant execute on function public.rpc_request_clear_assignee(uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
