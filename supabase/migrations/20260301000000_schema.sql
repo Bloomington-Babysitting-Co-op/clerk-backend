@@ -479,6 +479,9 @@ returns table (
   id uuid,
   request_id uuid,
   family_id uuid,
+  family_name text,
+  hours_balance numeric,
+  has_used_this_month boolean,
   comment text,
   created_at timestamptz
 )
@@ -487,8 +490,45 @@ stable
 security definer
 set search_path = public
 as $$
-  select o.id, o.request_id, o.family_id, o.comment, o.created_at
+  with balances as (
+    select
+      fam.id as family_id,
+      coalesce(sum(
+        case
+          when le.to_family_id = fam.id then le.hours
+          when le.from_family_id = fam.id then -le.hours
+          else 0
+        end
+      ), 0) as hours_balance
+    from public.families fam
+    left join public.ledger_entries le
+      on le.to_family_id = fam.id or le.from_family_id = fam.id
+    group by fam.id
+  ),
+  monthly_usage as (
+    select
+      le.from_family_id as family_id,
+      true as has_used_this_month
+    from public.ledger_entries le
+    join public.requests r on r.id = le.request_id
+    where r.request_type = 'babysit'
+      and le.entry_date >= date_trunc('month', now())
+      and le.entry_date < date_trunc('month', now()) + interval '1 month'
+    group by le.from_family_id
+  )
+  select
+    o.id,
+    o.request_id,
+    o.family_id,
+    f.name as family_name,
+    coalesce(b.hours_balance, 0) as hours_balance,
+    coalesce(mu.has_used_this_month, false) as has_used_this_month,
+    o.comment,
+    o.created_at
   from public.offers o
+  join public.families f on f.id = o.family_id
+  left join balances b on b.family_id = o.family_id
+  left join monthly_usage mu on mu.family_id = o.family_id
   where o.request_id = p_request_id
   order by o.created_at desc;
 $$;
@@ -965,7 +1005,7 @@ as $$
   order by r.start_time asc;
 $$;
 
--- RPC: dashboard open requests from other users
+-- RPC: dashboard all non-terminal requests
 create or replace function public.rpc_list_open_other_requests()
 returns table (
   id uuid,
@@ -980,6 +1020,46 @@ returns table (
   flexible_date boolean,
   flexible_start_time boolean,
   flexible_end_time boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    r.id,
+    r.requester_family_id,
+    r.start_time,
+    r.end_time,
+    r.request_date,
+    r.request_type,
+    r.status,
+    r.notes,
+    r.hours,
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time
+  from public.requests r
+  where r.status not in ('completed', 'cancelled', 'expired')
+  order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
+$$;
+
+-- RPC: dashboard requests from other families that current family has submitted offers on
+create or replace function public.rpc_list_my_submitted_offers()
+returns table (
+  id uuid,
+  requester_family_id uuid,
+  start_time timestamptz,
+  end_time timestamptz,
+  request_date date,
+  request_type text,
+  status text,
+  notes text,
+  hours numeric,
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  offer_created_at timestamptz
 )
 language sql
 stable
@@ -1001,16 +1081,15 @@ as $$
     r.hours,
     r.flexible_date,
     r.flexible_start_time,
-    r.flexible_end_time
-  from public.requests r
+    r.flexible_end_time,
+    o.created_at as offer_created_at
+  from public.offers o
+  join public.requests r on r.id = o.request_id
   cross join me
-  where r.status = 'open'
+  where o.family_id = me.family_id
     and r.requester_family_id <> me.family_id
-    and (
-      (r.end_time is not null and r.end_time >= now())
-      or (r.end_time is null and r.request_date is not null and r.request_date >= current_date)
-    )
-  order by r.start_time asc;
+    and r.status not in ('completed', 'cancelled', 'expired')
+  order by o.created_at desc, r.id;
 $$;
 
 -- RPC: whether current user completed a babysit this calendar month
@@ -1418,6 +1497,7 @@ grant execute on function public.rpc_cancel_request(uuid) to authenticated, serv
 grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
 grant execute on function public.rpc_list_user_future_requests() to authenticated, service_role;
 grant execute on function public.rpc_list_open_other_requests() to authenticated, service_role;
+grant execute on function public.rpc_list_my_submitted_offers() to authenticated, service_role;
 grant execute on function public.rpc_has_completed_sit_this_month() to authenticated, service_role;
 grant execute on function public.rpc_is_admin() to authenticated, service_role;
 grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
