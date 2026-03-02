@@ -65,20 +65,20 @@ create table public.requests (
   id uuid primary key default gen_random_uuid(),
   requester_family_id uuid not null references public.families(id) on delete cascade,
   request_type text not null,
+  notes text,
   request_date date,
   start_time timestamptz,
   end_time timestamptz,
   flexible_date boolean not null default false,
   flexible_start_time boolean not null default false,
   flexible_end_time boolean not null default false,
+  hours numeric,
   sit_location text,
   meal_required boolean not null default false,
   meal_prepared_by_sitter boolean not null default false,
-  sitters_kids_welcome boolean not null default false,
+  sitters_children_welcome boolean not null default false,
   origin text,
   destination text,
-  hours numeric,
-  notes text,
   status text not null,
   assignee_family_id uuid references public.families(id),
   created_at timestamptz default now(),
@@ -497,17 +497,17 @@ $$;
 create or replace function public.rpc_create_request(
   p_request_type text,
   p_notes text,
-  p_flexible_date boolean default false,
-  p_flexible_start_time boolean default false,
-  p_flexible_end_time boolean default false,
   p_request_date date default null,
   p_start_time timestamptz default null,
   p_end_time timestamptz default null,
+  p_flexible_date boolean default false,
+  p_flexible_start_time boolean default false,
+  p_flexible_end_time boolean default false,
   p_hours numeric default null,
   p_sit_location text default null,
   p_meal_required boolean default false,
   p_meal_prepared_by_sitter boolean default false,
-  p_sitters_kids_welcome boolean default false,
+  p_sitters_children_welcome boolean default false,
   p_child_ids uuid[] default null,
   p_origin text default null,
   p_destination text default null
@@ -555,7 +555,7 @@ begin
   v_hours := p_hours;
 
   if p_request_type = 'babysit' and p_start_time is not null and p_end_time is not null then
-    v_hours := extract(epoch from (p_end_time - p_start_time)) / 3600;
+    v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
   end if;
 
   if v_hours is not null and v_hours <= 0 then
@@ -566,17 +566,17 @@ begin
     requester_family_id,
     request_type,
     notes,
-    flexible_date,
-    flexible_start_time,
-    flexible_end_time,
     request_date,
     start_time,
     end_time,
+    flexible_date,
+    flexible_start_time,
+    flexible_end_time,
     hours,
     sit_location,
     meal_required,
     meal_prepared_by_sitter,
-    sitters_kids_welcome,
+    sitters_children_welcome,
     origin,
     destination,
     status
@@ -585,17 +585,17 @@ begin
     v_family_id,
     p_request_type,
     p_notes,
-    coalesce(p_flexible_date, false),
-    coalesce(p_flexible_start_time, false),
-    coalesce(p_flexible_end_time, false),
     p_request_date,
     p_start_time,
     p_end_time,
+    coalesce(p_flexible_date, false),
+    coalesce(p_flexible_start_time, false),
+    coalesce(p_flexible_end_time, false),
     v_hours,
     p_sit_location,
     coalesce(p_meal_required, false),
     coalesce(p_meal_prepared_by_sitter, false),
-    coalesce(p_sitters_kids_welcome, false),
+    coalesce(p_sitters_children_welcome, false),
     case when p_request_type = 'drive' then p_origin else null end,
     case when p_request_type = 'drive' then p_destination else null end,
     'open'
@@ -629,18 +629,18 @@ $$;
 -- RPC: update an open request created by current user
 create or replace function public.rpc_update_request(
   p_request_id uuid,
+  p_notes text default null,
   p_request_date date default null,
+  p_start_time timestamptz default null,
+  p_end_time timestamptz default null,
   p_flexible_date boolean default false,
   p_flexible_start_time boolean default false,
   p_flexible_end_time boolean default false,
-  p_start_time timestamptz default null,
-  p_end_time timestamptz default null,
-  p_notes text default null,
   p_hours numeric default null,
   p_sit_location text default null,
   p_meal_required boolean default false,
   p_meal_prepared_by_sitter boolean default false,
-  p_sitters_kids_welcome boolean default false,
+  p_sitters_children_welcome boolean default false,
   p_child_ids uuid[] default null,
   p_origin text default null,
   p_destination text default null
@@ -694,7 +694,7 @@ begin
   v_hours := p_hours;
 
   if v_request_type = 'babysit' and p_start_time is not null and p_end_time is not null then
-    v_hours := extract(epoch from (p_end_time - p_start_time)) / 3600;
+    v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
   end if;
 
   if v_hours is not null and v_hours <= 0 then
@@ -702,18 +702,18 @@ begin
   end if;
 
   update public.requests
-  set request_date = p_request_date,
+    set notes = p_notes,
+      request_date = p_request_date,
+      start_time = p_start_time,
+      end_time = p_end_time,
       flexible_date = coalesce(p_flexible_date, false),
       flexible_start_time = coalesce(p_flexible_start_time, false),
       flexible_end_time = coalesce(p_flexible_end_time, false),
-      start_time = p_start_time,
-      end_time = p_end_time,
-      notes = p_notes,
       hours = v_hours,
       sit_location = case when v_request_type = 'babysit' then p_sit_location else null end,
       meal_required = case when v_request_type = 'babysit' then coalesce(p_meal_required, false) else false end,
       meal_prepared_by_sitter = case when v_request_type = 'babysit' then coalesce(p_meal_prepared_by_sitter, false) else false end,
-      sitters_kids_welcome = case when v_request_type = 'babysit' then coalesce(p_sitters_kids_welcome, false) else false end,
+      sitters_children_welcome = case when v_request_type = 'babysit' then coalesce(p_sitters_children_welcome, false) else false end,
       origin = case when v_request_type = 'drive' then p_origin else null end,
       destination = case when v_request_type = 'drive' then p_destination else null end
   where id = p_request_id;
@@ -1247,7 +1247,7 @@ as $$
       r.hours,
       case
         when r.start_time is not null and r.end_time is not null
-          then extract(epoch from (r.end_time - r.start_time)) / 3600
+          then ceil(extract(epoch from (r.end_time - r.start_time)) / 900.0) * 0.25
         else null
       end
     ) as hours,
@@ -1409,8 +1409,8 @@ grant execute on function public.rpc_get_my_parent_profile() to authenticated, s
 grant execute on function public.rpc_upsert_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
-grant execute on function public.rpc_create_request(text, text, boolean, boolean, boolean, date, timestamptz, timestamptz, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
-grant execute on function public.rpc_update_request(uuid, date, boolean, boolean, boolean, timestamptz, timestamptz, text, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
+grant execute on function public.rpc_create_request(text, text, date, timestamptz, timestamptz, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
+grant execute on function public.rpc_update_request(uuid, text, date, timestamptz, timestamptz, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
