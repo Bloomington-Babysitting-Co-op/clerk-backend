@@ -149,6 +149,27 @@ create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
 create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_entry_date_idx on public.ledger_entries(entry_date);
 
+-- Function: refresh request statuses based on request_date lifecycle
+create or replace function public.rpc_refresh_request_statuses()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.requests
+  set status = 'expired',
+      assignee_family_id = null
+  where request_date < current_date
+    and status in ('open', 'offered');
+
+  update public.requests
+  set status = 'completed'
+  where request_date < current_date
+    and status = 'assigned';
+end;
+$$;
+
 -- Function: get or create the current auth user's family id
 create or replace function public.rpc_current_family_id()
 returns uuid
@@ -429,27 +450,36 @@ returns table (
   notes text,
   hours numeric
 )
-language sql
-stable
+language plpgsql
 security definer
 set search_path = public
 as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
   select r.id, r.start_time, r.end_time, r.request_date, r.request_type, r.status, r.notes, r.hours
   from public.requests r
   order by coalesce(r.start_time, r.request_date::timestamptz) asc;
+end;
 $$;
 
 -- RPC: get full request details for request view page
 create or replace function public.rpc_get_request(p_request_id uuid)
 returns public.requests
-language sql
-stable
+language plpgsql
 security definer
 set search_path = public
 as $$
-  select r.*
-  from public.requests r
-  where r.id = p_request_id;
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return (
+    select r
+    from public.requests r
+    where r.id = p_request_id
+  );
+end;
 $$;
 
 -- RPC: list selected children for a request
@@ -564,6 +594,8 @@ declare
 begin
   v_family_id := public.rpc_current_family_id();
 
+  perform public.rpc_refresh_request_statuses();
+
   if p_request_type not in ('babysit', 'drive', 'favor') then
     raise exception 'Invalid request type';
   end if;
@@ -662,7 +694,7 @@ begin
 end;
 $$;
 
--- RPC: update an open request created by current user
+-- RPC: update an open, offered, or assigned request created by current user
 create or replace function public.rpc_update_request(
   p_request_id uuid,
   p_notes text default null,
@@ -693,6 +725,8 @@ declare
 begin
   v_family_id := public.rpc_current_family_id();
 
+  perform public.rpc_refresh_request_statuses();
+
   if p_notes is null or btrim(p_notes) = '' then
     raise exception 'Description is required';
   end if;
@@ -701,7 +735,7 @@ begin
   from public.requests
   where id = p_request_id
     and requester_family_id = v_family_id
-    and status = 'open';
+    and status in ('open', 'offered', 'assigned');
 
   if not found then
     raise exception 'Request not found or not editable';
@@ -791,6 +825,8 @@ declare
 begin
   v_family_id := public.rpc_current_family_id();
 
+  perform public.rpc_refresh_request_statuses();
+
   select * into v_request
   from public.requests
   where id = p_request_id;
@@ -818,6 +854,144 @@ begin
 end;
 $$;
 
+-- RPC: edit a submitted offer owned by current family
+create or replace function public.rpc_update_offer(
+  p_offer_id uuid,
+  p_comment text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+  v_offer_request_id uuid;
+  v_offer_family_id uuid;
+  v_requester_family_id uuid;
+  v_request_status text;
+  v_assignee_family_id uuid;
+begin
+  v_family_id := public.rpc_current_family_id();
+
+  select o.request_id, o.family_id
+  into v_offer_request_id, v_offer_family_id
+  from public.offers o
+  where o.id = p_offer_id;
+
+  if v_offer_request_id is null then
+    raise exception 'Offer not found';
+  end if;
+
+  if v_offer_family_id <> v_family_id then
+    raise exception 'Only the offering family can edit this offer';
+  end if;
+
+  select r.requester_family_id, r.status, r.assignee_family_id
+  into v_requester_family_id, v_request_status, v_assignee_family_id
+  from public.requests r
+  where r.id = v_offer_request_id;
+
+  if v_requester_family_id is null then
+    raise exception 'Request not found';
+  end if;
+
+  if v_requester_family_id = v_family_id then
+    raise exception 'Requester cannot edit own offer';
+  end if;
+
+  if v_request_status not in ('open', 'offered', 'assigned') then
+    raise exception 'Offer cannot be edited in current request status';
+  end if;
+
+  update public.offers
+  set comment = p_comment
+  where id = p_offer_id;
+end;
+$$;
+
+-- RPC: cancel a submitted offer owned by current family
+create or replace function public.rpc_cancel_offer(
+  p_offer_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+  v_offer_request_id uuid;
+  v_offer_family_id uuid;
+  v_requester_family_id uuid;
+  v_request_status text;
+begin
+  v_family_id := public.rpc_current_family_id();
+
+  perform public.rpc_refresh_request_statuses();
+
+  select o.request_id, o.family_id
+  into v_offer_request_id, v_offer_family_id
+  from public.offers o
+  where o.id = p_offer_id;
+
+  if v_offer_request_id is null then
+    raise exception 'Offer not found';
+  end if;
+
+  if v_offer_family_id <> v_family_id then
+    raise exception 'Only the offering family can cancel this offer';
+  end if;
+
+  select r.requester_family_id, r.status
+  into v_requester_family_id, v_request_status
+  from public.requests r
+  where r.id = v_offer_request_id;
+
+  if v_requester_family_id is null then
+    raise exception 'Request not found';
+  end if;
+
+  if v_requester_family_id = v_family_id then
+    raise exception 'Requester cannot cancel own offer';
+  end if;
+
+  if v_request_status not in ('open', 'offered', 'assigned') then
+    raise exception 'Offer cannot be cancelled in current request status';
+  end if;
+
+  delete from public.offers
+  where id = p_offer_id;
+
+  if v_request_status = 'offered' then
+    if not exists (
+      select 1 from public.offers o where o.request_id = v_offer_request_id
+    ) then
+      update public.requests
+      set status = 'open'
+      where id = v_offer_request_id
+        and status = 'offered';
+    end if;
+  elsif v_request_status = 'assigned' and v_assignee_family_id = v_family_id then
+    if exists (
+      select 1 from public.offers o where o.request_id = v_offer_request_id
+    ) then
+      update public.requests
+      set status = 'offered',
+          assignee_family_id = null
+      where id = v_offer_request_id
+        and status = 'assigned';
+    else
+      update public.requests
+      set status = 'open',
+          assignee_family_id = null
+      where id = v_offer_request_id
+        and status = 'assigned';
+    end if;
+  end if;
+end;
+$$;
+
 -- RPC: requester selects the winning offer and assigns request
 create or replace function public.rpc_select_request_winner(
   p_request_id uuid,
@@ -835,6 +1009,8 @@ declare
   v_family_id uuid;
 begin
   v_family_id := public.rpc_current_family_id();
+
+  perform public.rpc_refresh_request_statuses();
 
   select requester_family_id, status into v_requester_family_id, v_status
   from public.requests
@@ -882,6 +1058,8 @@ declare
   v_family_id uuid;
 begin
   v_family_id := public.rpc_current_family_id();
+
+  perform public.rpc_refresh_request_statuses();
 
   select requester_family_id, assignee_family_id, status into v_requester_family_id, v_assignee_family_id, v_status
   from public.requests
@@ -967,11 +1145,14 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean
 )
-language sql
-stable
+language plpgsql
 security definer
 set search_path = public
 as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
   with me as (
     select public.rpc_current_family_id() as family_id
   )
@@ -997,6 +1178,7 @@ as $$
       or (r.request_date is null and coalesce(r.flexible_date, false))
     )
   order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
+end;
 $$;
 
 -- RPC: dashboard all non-terminal requests
@@ -1015,11 +1197,17 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean
 )
-language sql
-stable
+language plpgsql
 security definer
 set search_path = public
 as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
+  with me as (
+    select public.rpc_current_family_id() as family_id
+  )
   select
     r.id,
     r.requester_family_id,
@@ -1034,8 +1222,17 @@ as $$
     r.flexible_start_time,
     r.flexible_end_time
   from public.requests r
+  cross join me
   where r.status in ('open', 'offered')
+    and r.requester_family_id <> me.family_id
+    and not exists (
+      select 1
+      from public.offers o
+      where o.request_id = r.id
+        and o.family_id = me.family_id
+    )
   order by coalesce(r.start_time, r.request_date::timestamptz) asc nulls last, r.id;
+end;
 $$;
 
 -- RPC: dashboard requests from other families that current family has submitted offers on
@@ -1055,11 +1252,14 @@ returns table (
   flexible_end_time boolean,
   offer_created_at timestamptz
 )
-language sql
-stable
+language plpgsql
 security definer
 set search_path = public
 as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
   with me as (
     select public.rpc_current_family_id() as family_id
   )
@@ -1084,6 +1284,7 @@ as $$
     and r.requester_family_id <> me.family_id
     and r.status not in ('completed', 'cancelled', 'expired')
   order by o.created_at desc, r.id;
+end;
 $$;
 
 -- RPC: whether current user completed a babysit this calendar month
@@ -1485,6 +1686,8 @@ grant execute on function public.rpc_replace_my_family_children(jsonb) to authen
 grant execute on function public.rpc_create_request(text, text, date, timestamptz, timestamptz, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_update_request(uuid, text, date, timestamptz, timestamptz, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
+grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
+grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
 grant execute on function public.rpc_select_request_winner(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
