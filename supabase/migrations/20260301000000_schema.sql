@@ -68,8 +68,8 @@ create table public.requests (
   type text not null,
   notes text,
   date date,
-  start_time timestamptz,
-  end_time timestamptz,
+  start_time time,
+  end_time time,
   flexible_date boolean not null default false,
   flexible_start_time boolean not null default false,
   flexible_end_time boolean not null default false,
@@ -470,36 +470,6 @@ begin
 end;
 $$;
 
--- RPC: list all requests for requests page
-create or replace function public.rpc_list_requests()
-returns table (
-  id uuid,
-  start_time timestamptz,
-  end_time timestamptz,
-  date date,
-  type text,
-  status text,
-  family_name text,
-  notes text,
-  hours numeric
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  perform public.rpc_refresh_request_statuses();
-
-  return query
-  select r.id, r.start_time, r.end_time, r.date, r.type, r.status, f.name as family_name, r.notes, r.hours
-  from public.requests r
-  join public.families f on f.id = r.requester_family_id
-  order by r.date asc nulls first
-     ,r.start_time asc nulls first
-     ,r.id;
-end;
-$$;
-
 -- RPC: list requests with optional date/status filters and future-only mode
 create or replace function public.rpc_list_requests_filtered(
   p_start_date date default null,
@@ -509,8 +479,8 @@ create or replace function public.rpc_list_requests_filtered(
 )
 returns table (
   id uuid,
-  start_time timestamptz,
-  end_time timestamptz,
+  start_time time,
+  end_time time,
   date date,
   type text,
   status text,
@@ -663,8 +633,8 @@ create or replace function public.rpc_create_request(
   p_type text,
   p_notes text,
   p_date date default null,
-  p_start_time timestamptz default null,
-  p_end_time timestamptz default null,
+  p_start_time time default null,
+  p_end_time time default null,
   p_flexible_date boolean default false,
   p_flexible_start_time boolean default false,
   p_flexible_end_time boolean default false,
@@ -794,8 +764,8 @@ create or replace function public.rpc_update_request(
   p_request_id uuid,
   p_notes text default null,
   p_date date default null,
-  p_start_time timestamptz default null,
-  p_end_time timestamptz default null,
+  p_start_time time default null,
+  p_end_time time default null,
   p_flexible_date boolean default false,
   p_flexible_start_time boolean default false,
   p_flexible_end_time boolean default false,
@@ -1233,78 +1203,22 @@ as $$
   cross join me;
 $$;
 
--- RPC: dashboard active requests created by current user
-create or replace function public.rpc_list_requests_my_family_future()
-returns table (
-  id uuid,
-  start_time timestamptz,
-  end_time timestamptz,
-  date date,
-  type text,
-  status text,
-  family_name text,
-  notes text,
-  hours numeric,
-  flexible_date boolean,
-  flexible_start_time boolean,
-  flexible_end_time boolean
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  perform public.rpc_refresh_request_statuses();
-
-  return query
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select
-    r.id,
-    r.start_time,
-    r.end_time,
-    r.date,
-    r.type,
-    r.status,
-    f.name as family_name,
-    r.notes,
-    r.hours,
-    r.flexible_date,
-    r.flexible_start_time,
-    r.flexible_end_time
-  from public.requests r
-  join public.families f on f.id = r.requester_family_id
-  cross join me
-  where r.requester_family_id = me.family_id
-    and r.status not in ('completed', 'cancelled', 'expired')
-    and (
-      (r.end_time is not null and r.end_time >= now())
-      or (r.end_time is null and r.date is not null and r.date >= public.rpc_local_today())
-      or (r.date is null and coalesce(r.flexible_date, false))
-    )
-  order by r.date asc nulls first
-     ,r.start_time asc nulls first
-     ,r.id;
-end;
-$$;
-
 -- RPC: dashboard all non-terminal unassigned requests
 create or replace function public.rpc_list_requests_other_open()
 returns table (
   id uuid,
   requester_family_id uuid,
-  start_time timestamptz,
-  end_time timestamptz,
-  date date,
-  type text,
-  status text,
   family_name text,
+  status text,
+  type text,
   notes text,
-  hours numeric,
+  date date,
+  start_time time,
+  end_time time,
   flexible_date boolean,
   flexible_start_time boolean,
-  flexible_end_time boolean
+  flexible_end_time boolean,
+  hours numeric
 )
 language plpgsql
 security definer
@@ -1320,17 +1234,17 @@ begin
   select
     r.id,
     r.requester_family_id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
     r.start_time,
     r.end_time,
-    r.date,
-    r.type,
-    r.status,
-    f.name as family_name,
-    r.notes,
-    r.hours,
     r.flexible_date,
     r.flexible_start_time,
-    r.flexible_end_time
+    r.flexible_end_time,
+    r.hours
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   cross join me
@@ -1348,22 +1262,81 @@ begin
 end;
 $$;
 
+-- RPC: dashboard active requests created by current user
+create or replace function public.rpc_list_requests_my_family_future()
+returns table (
+  id uuid,
+  family_name text,
+  status text,
+  type text,
+  notes text,
+  date date,
+  start_time time,
+  end_time time,
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  hours numeric
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
+  with me as (
+    select public.rpc_get_family_id() as family_id
+  )
+  select
+    r.id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
+    r.start_time,
+    r.end_time,
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time,
+    r.hours
+  from public.requests r
+  join public.families f on f.id = r.requester_family_id
+  cross join me
+  where r.requester_family_id = me.family_id
+    and r.status not in ('completed', 'cancelled', 'expired')
+    and (
+      (r.date is not null and r.date > public.rpc_local_today())
+      or (
+        r.date = public.rpc_local_today()
+        and (r.end_time is null or r.end_time >= (now() at time zone 'America/Indiana/Indianapolis')::time)
+      )
+      or (r.date is null and coalesce(r.flexible_date, false))
+    )
+  order by r.date asc nulls first
+     ,r.start_time asc nulls first
+     ,r.id;
+end;
+$$;
+
 -- RPC: dashboard requests from other families that current family has submitted offers on
 create or replace function public.rpc_list_offers_my_submitted()
 returns table (
   id uuid,
   requester_family_id uuid,
-  start_time timestamptz,
-  end_time timestamptz,
-  date date,
-  type text,
-  status text,
   family_name text,
+  status text,
+  type text,
   notes text,
-  hours numeric,
+  date date,
+  start_time time,
+  end_time time,
   flexible_date boolean,
   flexible_start_time boolean,
   flexible_end_time boolean,
+  hours numeric,
   offer_created_at timestamptz
 )
 language plpgsql
@@ -1380,17 +1353,17 @@ begin
   select
     r.id,
     r.requester_family_id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
     r.start_time,
     r.end_time,
-    r.date as date,
-    r.type as type,
-    r.status,
-    f.name as family_name,
-    r.notes,
-    r.hours,
     r.flexible_date,
     r.flexible_start_time,
     r.flexible_end_time,
+    r.hours,
     o.created_at as offer_created_at
   from public.offers o
   join public.requests r on r.id = o.request_id
@@ -1886,7 +1859,6 @@ grant all on all sequences in schema public to service_role;
 grant all on all functions in schema public to service_role;
 
 -- RPC grants: only expose the frontend-used API surface
-grant execute on function public.rpc_list_requests() to authenticated, service_role;
 grant execute on function public.rpc_list_requests_filtered(date, date, text, boolean) to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
@@ -1898,8 +1870,8 @@ grant execute on function public.rpc_get_my_parent_profile() to authenticated, s
 grant execute on function public.rpc_upsert_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
-grant execute on function public.rpc_create_request(text, text, date, timestamptz, timestamptz, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
-grant execute on function public.rpc_update_request(uuid, text, date, timestamptz, timestamptz, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
+grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
+grant execute on function public.rpc_update_request(uuid, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
