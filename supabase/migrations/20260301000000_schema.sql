@@ -149,6 +149,38 @@ create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
 create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_entry_date_idx on public.ledger_entries(entry_date);
 
+-- Function: canonical local date for request lifecycle/validation checks
+create or replace function public.rpc_local_today()
+returns date
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select (now() at time zone 'America/Indiana/Indianapolis')::date;
+$$;
+
+-- Function: canonical local month window bounds for monthly checks
+create or replace function public.rpc_local_month_start()
+returns timestamptz
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select (date_trunc('month', now() at time zone 'America/Indiana/Indianapolis') at time zone 'America/Indiana/Indianapolis');
+$$;
+
+create or replace function public.rpc_local_month_end()
+returns timestamptz
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.rpc_local_month_start() + interval '1 month';
+$$;
+
 -- Function: refresh request statuses based on date lifecycle
 create or replace function public.rpc_refresh_request_statuses()
 returns void
@@ -160,12 +192,12 @@ begin
   update public.requests
   set status = 'expired',
       assignee_family_id = null
-  where date < current_date
+  where date < public.rpc_local_today()
     and status in ('open', 'offered');
 
   update public.requests
   set status = 'completed'
-  where date < current_date
+  where date < public.rpc_local_today()
     and status = 'assigned';
 end;
 $$;
@@ -546,8 +578,8 @@ as $$
     from public.ledger_entries le
     join public.requests r on r.id = le.request_id
     where r.type = 'babysit'
-      and le.entry_date >= date_trunc('month', now())
-      and le.entry_date < date_trunc('month', now()) + interval '1 month'
+      and le.entry_date >= public.rpc_local_month_start()
+      and le.entry_date < public.rpc_local_month_end()
     group by le.from_family_id
   )
   select
@@ -616,7 +648,7 @@ begin
     raise exception 'Request date is required';
   end if;
 
-  if p_date is not null and p_date < current_date then
+  if p_date is not null and p_date < public.rpc_local_today() then
     raise exception 'Request date cannot be in the past';
   end if;
 
@@ -753,7 +785,7 @@ begin
     raise exception 'Request date is required';
   end if;
 
-  if p_date is not null and p_date < current_date then
+  if p_date is not null and p_date < public.rpc_local_today() then
     raise exception 'Request date cannot be in the past';
   end if;
 
@@ -1099,45 +1131,6 @@ begin
 end;
 $$;
 
--- RPC: complete an assigned request (requester or assignee)
-create or replace function public.rpc_complete_request(p_request_id uuid)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_requester_family_id uuid;
-  v_assignee_family_id uuid;
-  v_status text;
-  v_family_id uuid;
-begin
-  v_family_id := public.rpc_get_family_id();
-
-  perform public.rpc_refresh_request_statuses();
-
-  select requester_family_id, assignee_family_id, status into v_requester_family_id, v_assignee_family_id, v_status
-  from public.requests
-  where id = p_request_id;
-
-  if not found then
-    raise exception 'Request not found';
-  end if;
-
-  if v_status <> 'assigned' then
-    raise exception 'Only assigned requests can be completed';
-  end if;
-
-  if v_family_id <> v_requester_family_id and v_family_id <> v_assignee_family_id then
-    raise exception 'Not allowed to complete this request';
-  end if;
-
-  update public.requests
-  set status = 'completed'
-  where id = p_request_id;
-end;
-$$;
-
 -- RPC: cancel request while still active
 create or replace function public.rpc_cancel_request(p_request_id uuid)
 returns void
@@ -1232,7 +1225,7 @@ begin
     and r.status not in ('completed', 'cancelled', 'expired')
     and (
       (r.end_time is not null and r.end_time >= now())
-      or (r.end_time is null and r.date is not null and r.date >= current_date)
+      or (r.end_time is null and r.date is not null and r.date >= public.rpc_local_today())
       or (r.date is null and coalesce(r.flexible_date, false))
     )
   order by r.date asc nulls first
@@ -1376,8 +1369,8 @@ as $$
     cross join me
     where le.from_family_id = me.family_id
       and r.type = 'babysit'
-      and le.entry_date >= date_trunc('month', now())
-      and le.entry_date < date_trunc('month', now()) + interval '1 month'
+      and le.entry_date >= public.rpc_local_month_start()
+      and le.entry_date < public.rpc_local_month_end()
   );
 $$;
 
@@ -1581,8 +1574,8 @@ as $$
   order by b.name nulls last, b.family_id;
 $$;
 
--- RPC: list completed sits for prefill in manual entry flow
-create or replace function public.rpc_list_requests_completed_for_prefill()
+-- RPC: list completed sits for entry creation
+create or replace function public.rpc_list_requests_completed_for_entry()
 returns table (
   request_id uuid,
   from_family_id uuid,
@@ -1867,7 +1860,6 @@ grant execute on function public.rpc_update_offer(uuid, text) to authenticated, 
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
 grant execute on function public.rpc_request_set_assignee(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_request_clear_assignee(uuid) to authenticated, service_role;
-grant execute on function public.rpc_complete_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
 grant execute on function public.rpc_list_requests_my_family_future() to authenticated, service_role;
@@ -1879,7 +1871,7 @@ grant execute on function public.rpc_get_my_family_details() to authenticated, s
 grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text, date, date, date, text) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
-grant execute on function public.rpc_list_requests_completed_for_prefill() to authenticated, service_role;
+grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_full() to authenticated, service_role;
 grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, timestamptz) to authenticated, service_role;
