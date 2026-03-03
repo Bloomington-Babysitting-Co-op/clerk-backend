@@ -23,4 +23,6 @@ npx supabase link --project-ref <your-project-ref>
 ## Deploy
 1. Push this folder to GitHub.
 2. Create migrations locally with `npx supabase migration new <name>`.
-3. Push migrations to remote with `npx supabase db push`.
+3. Push migrations to local with `npx supabase db push --local`.
+4. Wipe and reset the local db with `npx supabase db reset --local`
+5. Push migrations to remote with `npx supabase db push`.
