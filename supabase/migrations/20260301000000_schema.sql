@@ -1518,15 +1518,27 @@ returns table (
   entry_date timestamptz,
   hours numeric,
   from_family_id uuid,
-  to_family_id uuid
+  to_family_id uuid,
+  from_family_name text,
+  to_family_name text
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select le.id, le.request_id, le.entry_date, le.hours, le.from_family_id, le.to_family_id
+  select
+    le.id,
+    le.request_id,
+    le.entry_date,
+    le.hours,
+    le.from_family_id,
+    le.to_family_id,
+    ff.name as from_family_name,
+    tf.name as to_family_name
   from public.ledger_entries le
+  left join public.families ff on ff.id = le.from_family_id
+  left join public.families tf on tf.id = le.to_family_id
   where (p_start_date is null or le.entry_date >= p_start_date::timestamptz)
     and (p_end_date is null or le.entry_date < (p_end_date::timestamptz + interval '1 day'))
   order by le.entry_date desc;
@@ -1575,6 +1587,9 @@ returns table (
   request_id uuid,
   from_family_id uuid,
   to_family_id uuid,
+  request_date date,
+  sit_location text,
+  meal_required boolean,
   hours numeric,
   completed_at timestamptz,
   notes text
@@ -1584,10 +1599,21 @@ stable
 security definer
 set search_path = public
 as $$
+  with latest_entries as (
+    select
+      le.request_id,
+      max(le.entry_date) as latest_entry_date
+    from public.ledger_entries le
+    where le.request_id is not null
+    group by le.request_id
+  )
   select
     r.id as request_id,
     r.requester_family_id as from_family_id,
     r.assignee_family_id as to_family_id,
+    r.date as request_date,
+    r.sit_location,
+    r.meal_required,
     coalesce(
       r.hours,
       case
@@ -1596,12 +1622,19 @@ as $$
         else null
       end
     ) as hours,
-    le.entry_date as completed_at,
+    coalesce(le.latest_entry_date, r.end_time, r.start_time, r.date::timestamptz) as completed_at,
     r.notes
   from public.requests r
-  join public.ledger_entries le on le.request_id = r.id
+  left join latest_entries le on le.request_id = r.id
   where r.status = 'completed'
-  order by le.entry_date desc;
+    and r.assignee_family_id is not null
+    and not exists (
+      select 1
+      from public.ledger_entries le2
+      where le2.request_id = r.id
+    )
+  order by coalesce(le.latest_entry_date, r.end_time, r.start_time, r.date::timestamptz) desc,
+    r.id;
 $$;
 
 -- RPC: list families for from/to selectors
