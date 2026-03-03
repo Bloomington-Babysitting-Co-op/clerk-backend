@@ -140,7 +140,7 @@ create table public.ledger_entries (
   from_family_id uuid not null references public.families(id),
   to_family_id uuid not null references public.families(id),
   hours numeric not null check (hours > 0),
-  entry_date timestamptz not null default now(),
+  entry_date date not null default (now() at time zone 'America/Indiana/Indianapolis')::date,
   created_at timestamptz default now()
 );
 
@@ -162,23 +162,23 @@ $$;
 
 -- Function: canonical local month window bounds for monthly checks
 create or replace function public.rpc_local_month_start()
-returns timestamptz
+returns date
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select (date_trunc('month', now() at time zone 'America/Indiana/Indianapolis') at time zone 'America/Indiana/Indianapolis');
+  select date_trunc('month', public.rpc_local_today())::date;
 $$;
 
 create or replace function public.rpc_local_month_end()
-returns timestamptz
+returns date
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select public.rpc_local_month_start() + interval '1 month';
+  select (public.rpc_local_month_start() + interval '1 month')::date;
 $$;
 
 -- Function: refresh request statuses based on date lifecycle
@@ -1508,7 +1508,7 @@ create or replace function public.rpc_list_ledger_entries_filtered(
 returns table (
   id uuid,
   request_id uuid,
-  entry_date timestamptz,
+  entry_date date,
   hours numeric,
   from_family_id uuid,
   to_family_id uuid,
@@ -1532,8 +1532,8 @@ as $$
   from public.ledger_entries le
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
-  where (p_start_date is null or le.entry_date >= p_start_date::timestamptz)
-    and (p_end_date is null or le.entry_date < (p_end_date::timestamptz + interval '1 day'))
+  where (p_start_date is null or le.entry_date >= p_start_date)
+    and (p_end_date is null or le.entry_date <= p_end_date)
   order by le.entry_date desc;
 $$;
 
@@ -1584,7 +1584,6 @@ returns table (
   sit_location text,
   meal_required boolean,
   hours numeric,
-  completed_at timestamptz,
   notes text
 )
 language sql
@@ -1592,14 +1591,6 @@ stable
 security definer
 set search_path = public
 as $$
-  with latest_entries as (
-    select
-      le.request_id,
-      max(le.entry_date) as latest_entry_date
-    from public.ledger_entries le
-    where le.request_id is not null
-    group by le.request_id
-  )
   select
     r.id as request_id,
     r.requester_family_id as from_family_id,
@@ -1615,10 +1606,8 @@ as $$
         else null
       end
     ) as hours,
-    coalesce(le.latest_entry_date, r.end_time, r.start_time, r.date::timestamptz) as completed_at,
     r.notes
   from public.requests r
-  left join latest_entries le on le.request_id = r.id
   where r.status = 'completed'
     and r.assignee_family_id is not null
     and not exists (
@@ -1626,7 +1615,7 @@ as $$
       from public.ledger_entries le2
       where le2.request_id = r.id
     )
-  order by coalesce(le.latest_entry_date, r.end_time, r.start_time, r.date::timestamptz) desc,
+  order by r.date desc nulls last,
     r.id;
 $$;
 
@@ -1725,7 +1714,7 @@ create or replace function public.rpc_create_manual_ledger_entry(
   p_to_family_id uuid,
   p_hours numeric,
   p_request_id uuid default null,
-  p_entry_date timestamptz default null
+  p_entry_date date default null
 )
 returns uuid
 language plpgsql
@@ -1737,7 +1726,7 @@ declare
   v_is_admin boolean;
   v_family_id uuid;
   v_to_family_id uuid;
-  v_entry_date timestamptz;
+  v_entry_date date;
 begin
   v_family_id := public.rpc_get_family_id();
 
@@ -1752,7 +1741,7 @@ begin
     v_to_family_id := v_family_id;
   end if;
 
-  v_entry_date := coalesce(p_entry_date, now());
+  v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
 
   if p_hours is null or p_hours <= 0 then
     raise exception 'Hours must be greater than zero';
@@ -1778,7 +1767,7 @@ returns table (
   from_family_id uuid,
   to_family_id uuid,
   hours numeric,
-  entry_date timestamptz
+  entry_date date
 )
 language sql
 stable
@@ -1796,7 +1785,7 @@ create or replace function public.rpc_update_ledger_entry(
   p_from_family_id uuid,
   p_to_family_id uuid,
   p_hours numeric,
-  p_entry_date timestamptz default null
+  p_entry_date date default null
 )
 returns void
 language plpgsql
@@ -1874,6 +1863,6 @@ grant execute on function public.rpc_list_ledger_balances() to authenticated, se
 grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_full() to authenticated, service_role;
-grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, timestamptz) to authenticated, service_role;
+grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, date) to authenticated, service_role;
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
-grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, timestamptz) to authenticated, service_role;
+grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, date) to authenticated, service_role;
