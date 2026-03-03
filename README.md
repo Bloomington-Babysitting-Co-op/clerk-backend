@@ -1,4 +1,4 @@
-# Bloomington Babysitting Co-op Ledger - Backend
+# Bloomington Babysitting Co-op Clerk - Backend
 Created for Cloudflare Pages + Supabase + Resend.
 
 ## Setup
