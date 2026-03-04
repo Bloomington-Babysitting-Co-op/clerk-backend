@@ -1576,7 +1576,7 @@ as $$
   order by le.entry_date desc;
 $$;
 
--- RPC: per-user ledger balance table for admin ledger page
+-- RPC: family ledger balance table
 create or replace function public.rpc_list_ledger_balances()
 returns table (
   family_id uuid,
@@ -1747,8 +1747,8 @@ as $$
   order by lower(coalesce(f.name, '')), f.id;
 $$;
 
--- RPC: create manual ledger entry (admin unrestricted, non-admin to self only)
-create or replace function public.rpc_create_manual_ledger_entry(
+-- RPC: create ledger entry
+create or replace function public.rpc_create_ledger_entry(
   p_from_family_id uuid,
   p_to_family_id uuid,
   p_hours numeric,
@@ -1762,98 +1762,29 @@ set search_path = public
 as $$
 declare
   v_id uuid;
-  v_is_admin boolean;
   v_family_id uuid;
-  v_to_family_id uuid;
   v_entry_date date;
 begin
   v_family_id := public.rpc_get_family_id();
-
-  v_is_admin := public.rpc_get_admin_status();
-
-  if v_is_admin then
-    v_to_family_id := p_to_family_id;
-  else
-    if p_to_family_id <> v_family_id then
-      raise exception 'Non-admin entries must use yourself as recipient';
-    end if;
-    v_to_family_id := v_family_id;
-  end if;
-
   v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
 
-  if p_hours is null or p_hours <= 0 then
-    raise exception 'Hours must be greater than zero';
-  end if;
-
-  if p_from_family_id = v_to_family_id then
-    raise exception 'From family and to family must be different';
-  end if;
-
-  insert into public.ledger_entries (from_family_id, to_family_id, hours, entry_date, request_id)
-  values (p_from_family_id, v_to_family_id, p_hours, v_entry_date, p_request_id)
-  returning id into v_id;
-
-  return v_id;
-end;
-$$;
-
--- RPC: fetch a single ledger entry for edit screen
-create or replace function public.rpc_get_ledger_entry(p_entry_id uuid)
-returns table (
-  id uuid,
-  from_family_id uuid,
-  to_family_id uuid,
-  entry_date date,
-  hours numeric,
-  request_id uuid
-)
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select le.id, le.from_family_id, le.to_family_id, le.entry_date, le.hours, le.request_id
-  from public.ledger_entries le
-  where le.id = p_entry_id;
-$$;
-
--- RPC: update ledger entry (admin only)
-create or replace function public.rpc_update_ledger_entry(
-  p_entry_id uuid,
-  p_from_family_id uuid,
-  p_to_family_id uuid,
-  p_hours numeric,
-  p_entry_date date default null
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  if not public.rpc_get_admin_status() then
-    raise exception 'Admin only';
-  end if;
-
-  if p_hours is null or p_hours <= 0 then
-    raise exception 'Hours must be greater than zero';
+  if p_to_family_id <> v_family_id then
+    raise exception 'Entries must use your family as recipient';
   end if;
 
   if p_from_family_id = p_to_family_id then
     raise exception 'From family and to family must be different';
   end if;
 
-  update public.ledger_entries
-  set from_family_id = p_from_family_id,
-      to_family_id = p_to_family_id,
-      hours = p_hours,
-      entry_date = coalesce(p_entry_date, public.ledger_entries.entry_date)
-  where id = p_entry_id;
-
-  if not found then
-    raise exception 'Ledger entry not found';
+  if p_hours is null or p_hours <= 0 then
+    raise exception 'Hours must be greater than zero';
   end if;
+
+  insert into public.ledger_entries (from_family_id, to_family_id, hours, entry_date, request_id)
+  values (p_from_family_id, p_to_family_id, p_hours, v_entry_date, p_request_id)
+  returning id into v_id;
+
+  return v_id;
 end;
 $$;
 
@@ -2169,9 +2100,7 @@ grant execute on function public.rpc_list_ledger_balances() to authenticated, se
 grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_full() to authenticated, service_role;
-grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, date, uuid) to authenticated, service_role;
-grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
-grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, date) to authenticated, service_role;
+grant execute on function public.rpc_create_ledger_entry(uuid, uuid, numeric, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_admin_list_families() to authenticated, service_role;
 grant execute on function public.rpc_admin_create_family(text) to authenticated, service_role;
 grant execute on function public.rpc_admin_update_family(uuid, boolean, boolean, date, date, date) to authenticated, service_role;
