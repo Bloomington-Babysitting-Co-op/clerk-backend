@@ -470,12 +470,10 @@ begin
 end;
 $$;
 
--- RPC: list requests with optional date/status filters and future-only mode
+-- RPC: list requests with optional date filters
 create or replace function public.rpc_list_requests_filtered(
   p_start_date date default null,
-  p_end_date date default null,
-  p_status text default 'all',
-  p_future_only boolean default false
+  p_end_date date default null
 )
 returns table (
   id uuid,
@@ -510,15 +508,6 @@ begin
   join public.families f on f.id = r.requester_family_id
   where (p_start_date is null or (r.date is not null and r.date >= p_start_date))
     and (p_end_date is null or (r.date is not null and r.date <= p_end_date))
-    and (
-      coalesce(p_status, 'all') = 'all'
-      or (p_status = 'active' and r.status in ('open', 'offered', 'assigned'))
-      or r.status = p_status
-    )
-    and (
-      not coalesce(p_future_only, false)
-      or (r.date is not null and r.date >= public.rpc_local_today())
-    )
   order by r.date asc nulls first
      ,r.start_time asc nulls first
      ,r.id;
@@ -1859,7 +1848,7 @@ grant all on all sequences in schema public to service_role;
 grant all on all functions in schema public to service_role;
 
 -- RPC grants: only expose the frontend-used API surface
-grant execute on function public.rpc_list_requests_filtered(date, date, text, boolean) to authenticated, service_role;
+grant execute on function public.rpc_list_requests_filtered(date, date) to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
