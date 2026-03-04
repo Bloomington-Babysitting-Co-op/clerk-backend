@@ -1752,8 +1752,8 @@ create or replace function public.rpc_create_manual_ledger_entry(
   p_from_family_id uuid,
   p_to_family_id uuid,
   p_hours numeric,
-  p_request_id uuid default null,
-  p_entry_date date default null
+  p_entry_date date default null,
+  p_request_id uuid default null
 )
 returns uuid
 language plpgsql
@@ -1859,9 +1859,9 @@ $$;
 
 -- RPC: admin mass create ledger entry (admin only)
 create or replace function public.rpc_admin_create_ledger_entry(
+  p_hours numeric,
   p_from_family_id uuid default null,
   p_to_family_id uuid default null,
-  p_hours numeric,
   p_entry_date date default null,
   p_notes text default null
 )
@@ -2287,7 +2287,7 @@ grant execute on function public.rpc_list_ledger_balances() to authenticated, se
 grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_full() to authenticated, service_role;
-grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, date) to authenticated, service_role;
+grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
 grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, date) to authenticated, service_role;
 grant execute on function public.rpc_admin_list_families() to authenticated, service_role;
@@ -2298,4 +2298,4 @@ grant execute on function public.rpc_admin_list_users() to authenticated, servic
 grant execute on function public.rpc_admin_create_user(text, text, uuid, text, text) to authenticated, service_role;
 grant execute on function public.rpc_admin_update_user_family(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_admin_delete_user(uuid) to authenticated, service_role;
-grant execute on function public.rpc_admin_create_ledger_entry(uuid, uuid, numeric, date, text) to authenticated, service_role;
+grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
