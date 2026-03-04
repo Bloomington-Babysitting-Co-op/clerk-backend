@@ -26,6 +26,7 @@ create table public.families (
   admin_last_background_check date,
   admin_last_dues_payment date,
   admin_general_notes text,
+  is_active boolean default true,
   is_admin boolean default false
 );
 
@@ -124,7 +125,7 @@ create index request_children_child_id_idx on public.request_children(child_id);
 create table public.offers (
   id uuid primary key default gen_random_uuid(),
   request_id uuid not null references public.requests(id) on delete cascade,
-  family_id uuid not null references public.families(id),
+  family_id uuid not null references public.families(id) on delete cascade,
   notes text,
   created_at timestamptz not null default now(),
   unique (request_id, family_id)
@@ -222,6 +223,15 @@ begin
   where fm.user_id = auth.uid();
 
   if v_family_id is not null then
+    if exists (
+      select 1
+      from public.families f
+      where f.id = v_family_id
+        and coalesce(f.is_active, true) = false
+    ) then
+      raise exception 'Family is inactive';
+    end if;
+
     return v_family_id;
   end if;
 
@@ -240,6 +250,23 @@ begin
 
   return v_family_id;
 end;
+$$;
+
+-- RPC: whether current user's family is active
+create or replace function public.rpc_is_current_family_active()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (
+    select public.rpc_get_family_id() as family_id
+  )
+  select coalesce(f.is_active, true)
+  from public.families f
+  cross join me
+  where f.id = me.family_id;
 $$;
 
 -- RPC: whether current user is an admin
@@ -1835,6 +1862,347 @@ begin
 end;
 $$;
 
+-- RPC: internal helper to determine if a family can be hard-deleted
+create or replace function public.rpc_admin_family_is_deletable(p_family_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    not exists (
+      select 1
+      from public.requests r
+      where r.requester_family_id = p_family_id
+         or r.assignee_family_id = p_family_id
+    )
+    and not exists (
+      select 1
+      from public.ledger_entries le
+      where le.from_family_id = p_family_id
+         or le.to_family_id = p_family_id
+    );
+$$;
+
+-- RPC: list all families for admin management
+create or replace function public.rpc_admin_list_families()
+returns table (
+  id uuid,
+  name text,
+  is_active boolean,
+  is_admin boolean,
+  admin_date_joined date,
+  admin_last_background_check date,
+  admin_last_dues_payment date,
+  member_count integer,
+  can_delete boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    f.id,
+    f.name,
+    coalesce(f.is_active, true) as is_active,
+    coalesce(f.is_admin, false) as is_admin,
+    f.admin_date_joined,
+    f.admin_last_background_check,
+    f.admin_last_dues_payment,
+    (
+      select count(*)::integer
+      from public.family_parents fp
+      where fp.family_id = f.id
+    ) as member_count,
+    public.rpc_admin_family_is_deletable(f.id) as can_delete
+  from public.families f
+  where public.rpc_get_admin_status()
+  order by lower(coalesce(f.name, '')), f.id;
+$$;
+
+-- RPC: create a family by name for admin management
+create or replace function public.rpc_admin_create_family(p_name text)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_id uuid;
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  if p_name is null or btrim(p_name) = '' then
+    raise exception 'Family name is required';
+  end if;
+
+  insert into public.families (name)
+  values (btrim(p_name))
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+-- RPC: update family admin and active fields
+create or replace function public.rpc_admin_update_family(
+  p_family_id uuid,
+  p_is_active boolean,
+  p_is_admin boolean,
+  p_admin_date_joined date default null,
+  p_admin_last_background_check date default null,
+  p_admin_last_dues_payment date default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  update public.families
+  set is_active = coalesce(p_is_active, true),
+      is_admin = coalesce(p_is_admin, false),
+      admin_date_joined = p_admin_date_joined,
+      admin_last_background_check = p_admin_last_background_check,
+      admin_last_dues_payment = p_admin_last_dues_payment
+  where id = p_family_id;
+
+  if not found then
+    raise exception 'Family not found';
+  end if;
+end;
+$$;
+
+-- RPC: hard-delete eligible family and all linked users (users deleted first)
+create or replace function public.rpc_admin_delete_family(p_family_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  if not public.rpc_admin_family_is_deletable(p_family_id) then
+    raise exception 'Family is not eligible for deletion';
+  end if;
+
+  delete from auth.users u
+  using public.family_parents fp
+  where fp.family_id = p_family_id
+    and fp.user_id = u.id;
+
+  delete from public.families f
+  where f.id = p_family_id;
+
+  if not found then
+    raise exception 'Family not found';
+  end if;
+end;
+$$;
+
+-- RPC: list users and their linked family for admin management
+create or replace function public.rpc_admin_list_users()
+returns table (
+  user_id uuid,
+  email text,
+  family_id uuid,
+  family_name text,
+  family_is_active boolean,
+  created_at timestamptz,
+  last_sign_in_at timestamptz,
+  can_delete boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    u.id as user_id,
+    u.email,
+    fp.family_id,
+    f.name as family_name,
+    coalesce(f.is_active, true) as family_is_active,
+    u.created_at,
+    u.last_sign_in_at,
+    public.rpc_admin_family_is_deletable(fp.family_id) as can_delete
+  from auth.users u
+  join public.family_parents fp on fp.user_id = u.id
+  join public.families f on f.id = fp.family_id
+  where public.rpc_get_admin_status()
+  order by lower(coalesce(u.email, '')), u.id;
+$$;
+
+-- RPC: create a user and link to a family
+create or replace function public.rpc_admin_create_user(
+  p_email text,
+  p_password text,
+  p_family_id uuid,
+  p_name text default null,
+  p_phone text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id uuid;
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  if p_email is null or btrim(p_email) = '' then
+    raise exception 'Email is required';
+  end if;
+
+  if p_password is null or length(p_password) < 8 then
+    raise exception 'Password must be at least 8 characters';
+  end if;
+
+  if p_family_id is null then
+    raise exception 'Family is required';
+  end if;
+
+  if not exists (select 1 from public.families f where f.id = p_family_id) then
+    raise exception 'Family not found';
+  end if;
+
+  if exists (select 1 from auth.users u where lower(u.email) = lower(btrim(p_email))) then
+    raise exception 'A user with that email already exists';
+  end if;
+
+  insert into auth.users (
+    id,
+    aud,
+    role,
+    email,
+    encrypted_password,
+    email_confirmed_at,
+    raw_app_meta_data,
+    raw_user_meta_data,
+    created_at,
+    updated_at,
+    is_sso_user,
+    is_anonymous
+  )
+  values (
+    gen_random_uuid(),
+    'authenticated',
+    'authenticated',
+    lower(btrim(p_email)),
+    extensions.crypt(p_password, extensions.gen_salt('bf')),
+    now(),
+    '{"provider":"email","providers":["email"]}'::jsonb,
+    '{}'::jsonb,
+    now(),
+    now(),
+    false,
+    false
+  )
+  returning id into v_user_id;
+
+  insert into public.family_parents (user_id, family_id, name, phone)
+  values (v_user_id, p_family_id, nullif(btrim(p_name), ''), nullif(btrim(p_phone), ''));
+
+  return v_user_id;
+end;
+$$;
+
+-- RPC: move a user to a different family
+create or replace function public.rpc_admin_update_user_family(
+  p_user_id uuid,
+  p_family_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  if p_user_id is null then
+    raise exception 'User is required';
+  end if;
+
+  if p_family_id is null then
+    raise exception 'Family is required';
+  end if;
+
+  if not exists (select 1 from auth.users u where u.id = p_user_id) then
+    raise exception 'User not found';
+  end if;
+
+  if not exists (select 1 from public.families f where f.id = p_family_id) then
+    raise exception 'Family not found';
+  end if;
+
+  update public.family_parents fp
+  set family_id = p_family_id
+  where fp.user_id = p_user_id;
+
+  if not found then
+    raise exception 'User is not linked to a family';
+  end if;
+end;
+$$;
+
+-- RPC: delete a user only when linked family is eligible for deletion
+create or replace function public.rpc_admin_delete_user(
+  p_user_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  if p_user_id is null then
+    raise exception 'User is required';
+  end if;
+
+  select fp.family_id into v_family_id
+  from public.family_parents fp
+  where fp.user_id = p_user_id;
+
+  if v_family_id is null then
+    raise exception 'User is not linked to a family';
+  end if;
+
+  if not public.rpc_admin_family_is_deletable(v_family_id) then
+    raise exception 'User can only be deleted when linked family is eligible for deletion';
+  end if;
+
+  delete from auth.users u
+  where u.id = p_user_id;
+
+  if not found then
+    raise exception 'User not found';
+  end if;
+end;
+$$;
+
 -- Security: enforce RPC-only access for anon/authenticated
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
@@ -1853,6 +2221,7 @@ grant execute on function public.rpc_get_request(uuid) to authenticated, service
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_family_id() to authenticated, service_role;
+grant execute on function public.rpc_is_current_family_active() to authenticated, service_role;
 grant execute on function public.rpc_add_family_member_by_email(text) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
@@ -1883,3 +2252,11 @@ grant execute on function public.rpc_list_families_full() to authenticated, serv
 grant execute on function public.rpc_create_manual_ledger_entry(uuid, uuid, numeric, uuid, date) to authenticated, service_role;
 grant execute on function public.rpc_get_ledger_entry(uuid) to authenticated, service_role;
 grant execute on function public.rpc_update_ledger_entry(uuid, uuid, uuid, numeric, date) to authenticated, service_role;
+grant execute on function public.rpc_admin_list_families() to authenticated, service_role;
+grant execute on function public.rpc_admin_create_family(text) to authenticated, service_role;
+grant execute on function public.rpc_admin_update_family(uuid, boolean, boolean, date, date, date) to authenticated, service_role;
+grant execute on function public.rpc_admin_delete_family(uuid) to authenticated, service_role;
+grant execute on function public.rpc_admin_list_users() to authenticated, service_role;
+grant execute on function public.rpc_admin_create_user(text, text, uuid, text, text) to authenticated, service_role;
+grant execute on function public.rpc_admin_update_user_family(uuid, uuid) to authenticated, service_role;
+grant execute on function public.rpc_admin_delete_user(uuid) to authenticated, service_role;
