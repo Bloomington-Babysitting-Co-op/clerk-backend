@@ -21,11 +21,10 @@ create table public.families (
   emergency_contacts jsonb,
   pets text,
   family_photo_url text,
-  business_information text,
+  notes text,
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
-  admin_general_notes text,
   is_active boolean default true,
   is_admin boolean default false
 );
@@ -137,18 +136,19 @@ create index offers_family_id_idx on public.offers(family_id);
 -- Table: ledger_entries stores hour transfers between families
 create table public.ledger_entries (
   id uuid primary key default gen_random_uuid(),
-  request_id uuid references public.requests(id) on delete cascade,
   from_family_id uuid not null references public.families(id),
   to_family_id uuid not null references public.families(id),
-  hours numeric not null check (hours > 0),
   entry_date date not null default (now() at time zone 'America/Indiana/Indianapolis')::date,
+  hours numeric not null check (hours > 0),
+  notes text,
+  request_id uuid references public.requests(id) on delete cascade,
   created_at timestamptz default now()
 );
 
-create index ledger_request_id_idx on public.ledger_entries(request_id);
 create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
 create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_entry_date_idx on public.ledger_entries(entry_date);
+create index ledger_request_id_idx on public.ledger_entries(request_id);
 
 -- Function: canonical local date for request lifecycle/validation checks
 create or replace function public.rpc_local_today()
@@ -1427,11 +1427,10 @@ returns table (
   emergency_contacts jsonb,
   pets text,
   family_photo_url text,
-  business_information text,
+  notes text,
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
-  admin_general_notes text,
   is_admin boolean
 )
 language sql
@@ -1449,11 +1448,10 @@ as $$
     p.emergency_contacts,
     p.pets,
     p.family_photo_url,
-    p.business_information,
+    p.notes,
     p.admin_date_joined,
     p.admin_last_background_check,
     p.admin_last_dues_payment,
-    p.admin_general_notes,
     p.is_admin
   from public.families p
   cross join me
@@ -1511,11 +1509,10 @@ begin
     emergency_contacts,
     pets,
     family_photo_url,
-    business_information,
+    notes,
     admin_date_joined,
     admin_last_background_check,
-    admin_last_dues_payment,
-    admin_general_notes
+    admin_last_dues_payment
   )
   values (
     v_family_id,
@@ -1524,11 +1521,10 @@ begin
     v_emergency_contacts,
     p_pets,
     p_family_photo_url,
-    p_business_information,
+    p_notes,
     case when v_is_admin then p_admin_date_joined else null end,
     case when v_is_admin then p_admin_last_background_check else null end,
-    case when v_is_admin then p_admin_last_dues_payment else null end,
-    case when v_is_admin then p_admin_general_notes else null end
+    case when v_is_admin then p_admin_last_dues_payment else null end
   )
   on conflict (id) do update
   set name = excluded.name,
@@ -1536,11 +1532,10 @@ begin
       emergency_contacts = excluded.emergency_contacts,
       pets = excluded.pets,
       family_photo_url = excluded.family_photo_url,
-      business_information = excluded.business_information,
+      notes = excluded.notes,
       admin_date_joined = case when v_is_admin then excluded.admin_date_joined else public.families.admin_date_joined end,
       admin_last_background_check = case when v_is_admin then excluded.admin_last_background_check else public.families.admin_last_background_check end,
-      admin_last_dues_payment = case when v_is_admin then excluded.admin_last_dues_payment else public.families.admin_last_dues_payment end,
-      admin_general_notes = case when v_is_admin then excluded.admin_general_notes else public.families.admin_general_notes end;
+      admin_last_dues_payment = case when v_is_admin then excluded.admin_last_dues_payment else public.families.admin_last_dues_payment end;
 end;
 $$;
 
@@ -1551,13 +1546,13 @@ create or replace function public.rpc_list_ledger_entries_filtered(
 )
 returns table (
   id uuid,
-  request_id uuid,
-  entry_date date,
-  hours numeric,
   from_family_id uuid,
   to_family_id uuid,
   from_family_name text,
   to_family_name text
+  entry_date date,
+  hours numeric,
+  request_id uuid,
 )
 language sql
 stable
@@ -1566,13 +1561,13 @@ set search_path = public
 as $$
   select
     le.id,
-    le.request_id,
-    le.entry_date,
-    le.hours,
     le.from_family_id,
     le.to_family_id,
     ff.name as from_family_name,
     tf.name as to_family_name
+    le.entry_date,
+    le.hours,
+    le.request_id,
   from public.ledger_entries le
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
@@ -1745,7 +1740,7 @@ as $$
     coalesce(cj.children, '[]'::jsonb) as children,
     f.pets,
     f.family_photo_url,
-    f.business_information
+    f.notes
   from public.families f
   left join parent_json pj on pj.family_id = f.id
   left join child_json cj on cj.family_id = f.id
@@ -1795,8 +1790,8 @@ begin
     raise exception 'From family and to family must be different';
   end if;
 
-  insert into public.ledger_entries (request_id, from_family_id, to_family_id, hours, entry_date)
-  values (p_request_id, p_from_family_id, v_to_family_id, p_hours, v_entry_date)
+  insert into public.ledger_entries (from_family_id, to_family_id, hours, entry_date, request_id)
+  values (p_from_family_id, v_to_family_id, p_hours, v_entry_date, p_request_id)
   returning id into v_id;
 
   return v_id;
@@ -1807,18 +1802,18 @@ $$;
 create or replace function public.rpc_get_ledger_entry(p_entry_id uuid)
 returns table (
   id uuid,
-  request_id uuid,
   from_family_id uuid,
   to_family_id uuid,
+  entry_date date,
   hours numeric,
-  entry_date date
+  request_id uuid
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select le.id, le.request_id, le.from_family_id, le.to_family_id, le.hours, le.entry_date
+  select le.id, le.from_family_id, le.to_family_id, le.entry_date, le.hours, le.request_id
   from public.ledger_entries le
   where le.id = p_entry_id;
 $$;
