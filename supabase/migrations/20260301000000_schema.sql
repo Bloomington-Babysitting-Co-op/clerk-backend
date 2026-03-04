@@ -1564,10 +1564,10 @@ as $$
     le.from_family_id,
     le.to_family_id,
     ff.name as from_family_name,
-    tf.name as to_family_name
+    tf.name as to_family_name,
     le.entry_date,
     le.hours,
-    le.request_id,
+    le.request_id
   from public.ledger_entries le
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
@@ -2082,83 +2082,6 @@ as $$
   order by lower(coalesce(u.email, '')), u.id;
 $$;
 
--- RPC: create a user and link to a family
-create or replace function public.rpc_admin_create_user(
-  p_email text,
-  p_password text,
-  p_family_id uuid,
-  p_name text default null,
-  p_phone text default null
-)
-returns uuid
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_user_id uuid;
-begin
-  if not public.rpc_get_admin_status() then
-    raise exception 'Admin only';
-  end if;
-
-  if p_email is null or btrim(p_email) = '' then
-    raise exception 'Email is required';
-  end if;
-
-  if p_password is null or length(p_password) < 8 then
-    raise exception 'Password must be at least 8 characters';
-  end if;
-
-  if p_family_id is null then
-    raise exception 'Family is required';
-  end if;
-
-  if not exists (select 1 from public.families f where f.id = p_family_id) then
-    raise exception 'Family not found';
-  end if;
-
-  if exists (select 1 from auth.users u where lower(u.email) = lower(btrim(p_email))) then
-    raise exception 'A user with that email already exists';
-  end if;
-
-  insert into auth.users (
-    id,
-    aud,
-    role,
-    email,
-    encrypted_password,
-    email_confirmed_at,
-    raw_app_meta_data,
-    raw_user_meta_data,
-    created_at,
-    updated_at,
-    is_sso_user,
-    is_anonymous
-  )
-  values (
-    gen_random_uuid(),
-    'authenticated',
-    'authenticated',
-    lower(btrim(p_email)),
-    extensions.crypt(p_password, extensions.gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}'::jsonb,
-    '{}'::jsonb,
-    now(),
-    now(),
-    false,
-    false
-  )
-  returning id into v_user_id;
-
-  insert into public.family_parents (user_id, family_id, name, phone)
-  values (v_user_id, p_family_id, nullif(btrim(p_name), ''), nullif(btrim(p_phone), ''));
-
-  return v_user_id;
-end;
-$$;
-
 -- RPC: move a user to a different family
 create or replace function public.rpc_admin_update_user_family(
   p_user_id uuid,
@@ -2196,47 +2119,6 @@ begin
 
   if not found then
     raise exception 'User is not linked to a family';
-  end if;
-end;
-$$;
-
--- RPC: delete a user only when linked family is eligible for deletion
-create or replace function public.rpc_admin_delete_user(
-  p_user_id uuid
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_family_id uuid;
-begin
-  if not public.rpc_get_admin_status() then
-    raise exception 'Admin only';
-  end if;
-
-  if p_user_id is null then
-    raise exception 'User is required';
-  end if;
-
-  select fp.family_id into v_family_id
-  from public.family_parents fp
-  where fp.user_id = p_user_id;
-
-  if v_family_id is null then
-    raise exception 'User is not linked to a family';
-  end if;
-
-  if not public.rpc_admin_family_is_deletable(v_family_id) then
-    raise exception 'User can only be deleted when linked family is eligible for deletion';
-  end if;
-
-  delete from auth.users u
-  where u.id = p_user_id;
-
-  if not found then
-    raise exception 'User not found';
   end if;
 end;
 $$;
@@ -2295,7 +2177,5 @@ grant execute on function public.rpc_admin_create_family(text) to authenticated,
 grant execute on function public.rpc_admin_update_family(uuid, boolean, boolean, date, date, date) to authenticated, service_role;
 grant execute on function public.rpc_admin_delete_family(uuid) to authenticated, service_role;
 grant execute on function public.rpc_admin_list_users() to authenticated, service_role;
-grant execute on function public.rpc_admin_create_user(text, text, uuid, text, text) to authenticated, service_role;
 grant execute on function public.rpc_admin_update_user_family(uuid, uuid) to authenticated, service_role;
-grant execute on function public.rpc_admin_delete_user(uuid) to authenticated, service_role;
 grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
