@@ -1549,10 +1549,10 @@ returns table (
   from_family_id uuid,
   to_family_id uuid,
   from_family_name text,
-  to_family_name text
+  to_family_name text,
   entry_date date,
   hours numeric,
-  request_id uuid,
+  request_id uuid
 )
 language sql
 stable
