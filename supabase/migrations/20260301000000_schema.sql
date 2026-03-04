@@ -1857,6 +1857,49 @@ begin
 end;
 $$;
 
+-- RPC: admin mass create ledger entry (admin only)
+create or replace function public.rpc_admin_create_ledger_entry(
+  p_from_family_id uuid default null,
+  p_to_family_id uuid default null,
+  p_hours numeric,
+  p_entry_date date default null,
+  p_notes text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_id uuid;
+  v_is_admin boolean;
+  v_entry_date date;
+begin
+  v_is_admin := public.rpc_get_admin_status();
+  if not v_is_admin then
+    raise exception 'Admin only';
+  end if;
+
+  if (p_from_family_id is null and p_to_family_id is null) then
+    raise exception 'At least one of from_family_id or to_family_id must be provided';
+  end if;
+  if (p_from_family_id is not null and p_to_family_id is not null and p_from_family_id = p_to_family_id) then
+    raise exception 'From family and to family must be different';
+  end if;
+  if p_hours is null or p_hours <= 0 or mod(p_hours * 100, 25) <> 0 then
+    raise exception 'Hours must be greater than zero and divisible by 0.25';
+  end if;
+
+  v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
+
+  insert into public.ledger_entries (from_family_id, to_family_id, hours, entry_date, notes)
+  values (p_from_family_id, p_to_family_id, p_hours, v_entry_date, p_notes)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
 -- RPC: internal helper to determine if a family can be hard-deleted
 create or replace function public.rpc_admin_family_is_deletable(p_family_id uuid)
 returns boolean
@@ -2255,3 +2298,4 @@ grant execute on function public.rpc_admin_list_users() to authenticated, servic
 grant execute on function public.rpc_admin_create_user(text, text, uuid, text, text) to authenticated, service_role;
 grant execute on function public.rpc_admin_update_user_family(uuid, uuid) to authenticated, service_role;
 grant execute on function public.rpc_admin_delete_user(uuid) to authenticated, service_role;
+grant execute on function public.rpc_admin_create_ledger_entry(uuid, uuid, numeric, date, text) to authenticated, service_role;
