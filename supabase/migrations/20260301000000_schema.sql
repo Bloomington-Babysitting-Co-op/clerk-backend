@@ -1842,6 +1842,11 @@ as $$
   select
     not exists (
       select 1
+      from public.family_parents fp
+      where fp.family_id = p_family_id
+    )
+    and not exists (
+      select 1
       from public.requests r
       where r.requester_family_id = p_family_id
          or r.assignee_family_id = p_family_id
@@ -1950,7 +1955,7 @@ begin
 end;
 $$;
 
--- RPC: hard-delete eligible family and all linked users (users deleted first)
+-- RPC: hard-delete eligible family
 create or replace function public.rpc_admin_delete_family(p_family_id uuid)
 returns void
 language plpgsql
@@ -1965,11 +1970,6 @@ begin
   if not public.rpc_admin_family_is_deletable(p_family_id) then
     raise exception 'Family is not eligible for deletion';
   end if;
-
-  delete from auth.users u
-  using public.family_parents fp
-  where fp.family_id = p_family_id
-    and fp.user_id = u.id;
 
   delete from public.families f
   where f.id = p_family_id;
