@@ -444,14 +444,14 @@ create or replace function public.rpc_list_requests_filtered(
 )
 returns table (
   id uuid,
+  family_name text,
+  status text,
+  type text,
+  date date,
   start_time time,
   end_time time,
-  date date,
-  type text,
-  status text,
-  family_name text,
-  notes text,
-  hours numeric
+  hours numeric,
+  notes text
 )
 language plpgsql
 security definer
@@ -463,14 +463,14 @@ begin
   return query
   select
     r.id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.date,
     r.start_time,
     r.end_time,
-    r.date,
-    r.type,
-    r.status,
-    f.name as family_name,
-    r.notes,
-    r.hours
+    r.hours,
+    r.notes
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   where (p_start_date is null or (r.date is not null and r.date >= p_start_date))
