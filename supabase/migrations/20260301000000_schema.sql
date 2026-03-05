@@ -1471,11 +1471,7 @@ create or replace function public.rpc_upsert_my_family_details(
   p_emergency_contacts jsonb default null,
   p_pets text default null,
   p_family_photo_url text default null,
-  p_business_information text default null,
-  p_admin_date_joined date default null,
-  p_admin_last_background_check date default null,
-  p_admin_last_dues_payment date default null,
-  p_admin_general_notes text default null
+  p_notes text default null
 )
 returns void
 language plpgsql
@@ -1685,13 +1681,15 @@ create or replace function public.rpc_list_families_full()
 returns table (
   family_id uuid,
   family_name text,
+  joined_date date,
+  is_admin boolean,
   address text,
   parents jsonb,
   emergency_contacts jsonb,
   children jsonb,
   pets text,
   family_photo_url text,
-  business_information text
+  notes text
 )
 language sql
 stable
@@ -1740,6 +1738,8 @@ as $$
   select
     f.id as family_id,
     f.name as family_name,
+    f.admin_date_joined as joined_date,
+    f.is_admin,
     f.address,
     coalesce(pj.parents, '[]'::jsonb) as parents,
     coalesce(f.emergency_contacts, '[]'::jsonb) as emergency_contacts,
@@ -2195,7 +2195,7 @@ grant execute on function public.rpc_list_offers_my_submitted() to authenticated
 grant execute on function public.rpc_has_completed_sit_this_month() to authenticated, service_role;
 grant execute on function public.rpc_get_admin_status() to authenticated, service_role;
 grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
-grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text, date, date, date, text) to authenticated, service_role;
+grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
 grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
