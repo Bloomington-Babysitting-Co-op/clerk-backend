@@ -142,12 +142,13 @@ create index offers_family_id_idx on public.offers(family_id);
 -- Table: ledger_entries stores hour transfers between families
 create table public.ledger_entries (
   id uuid primary key default gen_random_uuid(),
-  from_family_id uuid not null references public.families(id),
-  to_family_id uuid not null references public.families(id),
+  from_family_id uuid references public.families(id),
+  to_family_id uuid references public.families(id),
   entry_date date not null default (now() at time zone 'America/Indiana/Indianapolis')::date,
   hours numeric not null check (hours > 0),
   notes text,
   request_id uuid references public.requests(id),
+  constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null),
   created_at timestamptz default now()
 );
 
