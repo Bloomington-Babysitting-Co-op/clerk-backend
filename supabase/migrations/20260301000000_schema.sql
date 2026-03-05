@@ -456,7 +456,8 @@ $$;
 -- RPC: list requests with optional date filters
 create or replace function public.rpc_list_requests_filtered(
   p_start_date date default null,
-  p_end_date date default null
+  p_end_date date default null,
+  p_family_id uuid default null
 )
 returns table (
   id uuid,
@@ -491,6 +492,7 @@ begin
   join public.families f on f.id = r.requester_family_id
   where (p_start_date is null or (r.date is not null and r.date >= p_start_date))
     and (p_end_date is null or (r.date is not null and r.date <= p_end_date))
+    and (p_family_id is null or r.requester_family_id = p_family_id)
   order by r.date asc nulls first
      ,r.start_time asc nulls first
      ,r.id;
@@ -1491,7 +1493,8 @@ $$;
 -- RPC: ledger entries filtered by optional date range
 create or replace function public.rpc_list_ledger_entries_filtered(
   p_start_date date default null,
-  p_end_date date default null
+  p_end_date date default null,
+  p_family_id uuid default null
 )
 returns table (
   id uuid,
@@ -1522,6 +1525,7 @@ as $$
   left join public.families tf on tf.id = le.to_family_id
   where (p_start_date is null or le.entry_date >= p_start_date)
     and (p_end_date is null or le.entry_date <= p_end_date)
+    and (p_family_id is null or (le.from_family_id = p_family_id or le.to_family_id = p_family_id))
   order by le.entry_date desc;
 $$;
 
@@ -2112,7 +2116,7 @@ grant all on all sequences in schema public to service_role;
 grant all on all functions in schema public to service_role;
 
 -- RPC grants: only expose the frontend-used API surface
-grant execute on function public.rpc_list_requests_filtered(date, date) to authenticated, service_role;
+grant execute on function public.rpc_list_requests_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
@@ -2139,7 +2143,7 @@ grant execute on function public.rpc_has_completed_request_this_month() to authe
 grant execute on function public.rpc_get_admin_status() to authenticated, service_role;
 grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
 grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text) to authenticated, service_role;
-grant execute on function public.rpc_list_ledger_entries_filtered(date, date) to authenticated, service_role;
+grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
 grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
