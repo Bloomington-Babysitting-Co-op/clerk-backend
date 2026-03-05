@@ -1341,14 +1341,7 @@ begin
   join public.families f on f.id = r.requester_family_id
   cross join me
   where o.family_id = me.family_id
-    and r.requester_family_id <> me.family_id
-    and r.status in ('open', 'offered', 'assigned')
-    and not exists (
-      select 1
-      from public.offers o
-      where o.request_id = r.id
-        and o.assignee_family_id <> me.family_id
-    )
+    and (r.status = 'offered' or (r.status = 'assigned' and r.assignee_family_id = me.family_id))
   order by r.date asc nulls first
     ,r.start_time asc nulls first
     ,o.created_at desc
@@ -1411,7 +1404,6 @@ security definer
 set search_path = public
 as $$
 declare
-  v_is_admin boolean;
   v_family_id uuid;
   v_emergency_contacts jsonb;
 begin
@@ -1434,42 +1426,18 @@ begin
     end if;
   end if;
 
-  v_is_admin := public.rpc_get_admin_status();
+  update public.families
+  set name = p_name,
+      address = p_address,
+      emergency_contacts = v_emergency_contacts,
+      pets = p_pets,
+      family_photo_url = p_family_photo_url,
+      notes = p_notes
+  where id = v_family_id;
 
-  insert into public.families (
-    id,
-    name,
-    address,
-    emergency_contacts,
-    pets,
-    family_photo_url,
-    notes,
-    admin_date_joined,
-    admin_last_background_check,
-    admin_last_dues_payment
-  )
-  values (
-    v_family_id,
-    p_name,
-    p_address,
-    v_emergency_contacts,
-    p_pets,
-    p_family_photo_url,
-    p_notes,
-    case when v_is_admin then p_admin_date_joined else null end,
-    case when v_is_admin then p_admin_last_background_check else null end,
-    case when v_is_admin then p_admin_last_dues_payment else null end
-  )
-  on conflict (id) do update
-  set name = excluded.name,
-      address = excluded.address,
-      emergency_contacts = excluded.emergency_contacts,
-      pets = excluded.pets,
-      family_photo_url = excluded.family_photo_url,
-      notes = excluded.notes,
-      admin_date_joined = case when v_is_admin then excluded.admin_date_joined else public.families.admin_date_joined end,
-      admin_last_background_check = case when v_is_admin then excluded.admin_last_background_check else public.families.admin_last_background_check end,
-      admin_last_dues_payment = case when v_is_admin then excluded.admin_last_dues_payment else public.families.admin_last_dues_payment end;
+  if not found then
+    raise exception 'Family not found';
+  end if;
 end;
 $$;
 
@@ -2136,7 +2104,7 @@ grant execute on function public.rpc_get_family_id() to authenticated, service_r
 grant execute on function public.rpc_is_current_family_active() to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
-grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
+grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
