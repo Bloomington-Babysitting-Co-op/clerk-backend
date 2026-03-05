@@ -148,8 +148,8 @@ create table public.ledger_entries (
   hours numeric not null check (hours > 0),
   notes text,
   request_id uuid references public.requests(id),
-  user_id uuid references auth.users(id),
-  created_at timestamptz default now(),
+  created_by uuid not null default auth.uid() references auth.users(id),
+  created_at timestamptz not null default now(),
   constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null)
 );
 
@@ -210,7 +210,7 @@ begin
 end;
 $$;
 
--- Function: get or create the current auth user's family id
+-- Function: get the current auth user's family id
 create or replace function public.rpc_get_family_id()
 returns uuid
 language plpgsql
@@ -218,42 +218,26 @@ security definer
 set search_path = public
 as $$
 declare
+  v_user_id uuid := auth.uid();
   v_family_id uuid;
   v_email text;
 begin
-  if auth.uid() is null then
+  if v_user_id is null then
     raise exception 'Not authenticated';
   end if;
 
   select fm.family_id into v_family_id
   from public.family_parents fm
-  where fm.user_id = auth.uid();
+  where fm.user_id = v_user_id;
 
-  if v_family_id is not null then
-    if exists (
-      select 1
-      from public.families f
-      where f.id = v_family_id
-        and f.is_active = false
-    ) then
-      raise exception 'Family is inactive';
-    end if;
-
-    return v_family_id;
+  if exists (
+    select 1
+    from public.families f
+    where f.id = v_family_id
+      and f.is_active = false
+  ) then
+    raise exception 'Family is inactive';
   end if;
-
-  select u.email into v_email
-  from auth.users u
-  where u.id = auth.uid();
-
-  insert into public.families (name)
-  values (coalesce(nullif(split_part(v_email, '@', 1), ''), 'New Family'))
-  returning id into v_family_id;
-
-  insert into public.family_parents (user_id, family_id)
-  values (auth.uid(), v_family_id)
-  on conflict (user_id) do update
-  set family_id = excluded.family_id;
 
   return v_family_id;
 end;
@@ -341,8 +325,8 @@ as $$
   where fp.user_id = auth.uid();
 $$;
 
--- RPC: upsert current auth user's parent profile fields
-create or replace function public.rpc_upsert_my_parent_profile(
+-- RPC: update current auth user's parent profile fields
+create or replace function public.rpc_update_my_parent_profile(
   p_name text default null,
   p_phone text default null,
   p_notify_new_request boolean default false,
@@ -362,40 +346,22 @@ declare
 begin
   v_family_id := public.rpc_get_family_id();
 
-  insert into public.family_parents (
-    user_id,
-    family_id,
-    name,
-    phone,
-    notify_new_request,
-    notify_unoffered_48h,
-    notify_request_offered,
-    notify_offer_cancelled_or_edited,
-    notify_ledger_debtor,
-    notify_midmonth_inactive
-  )
-  values (
-    auth.uid(),
-    v_family_id,
-    nullif(btrim(p_name), ''),
-    nullif(btrim(p_phone), ''),
-    coalesce(p_notify_new_request, false),
-    coalesce(p_notify_unoffered_48h, false),
-    coalesce(p_notify_request_offered, false),
-    coalesce(p_notify_offer_cancelled_or_edited, false),
-    coalesce(p_notify_ledger_debtor, false),
-    coalesce(p_notify_midmonth_inactive, false)
-  )
-  on conflict (user_id) do update
-  set family_id = excluded.family_id,
-      name = excluded.name,
-      phone = excluded.phone,
-      notify_new_request = excluded.notify_new_request,
-      notify_unoffered_48h = excluded.notify_unoffered_48h,
-      notify_request_offered = excluded.notify_request_offered,
-      notify_offer_cancelled_or_edited = excluded.notify_offer_cancelled_or_edited,
-      notify_ledger_debtor = excluded.notify_ledger_debtor,
-      notify_midmonth_inactive = excluded.notify_midmonth_inactive;
+  update public.family_parents
+  set
+    family_id = v_family_id,
+    name = nullif(btrim(p_name), ''),
+    phone = nullif(btrim(p_phone), ''),
+    notify_new_request = coalesce(p_notify_new_request, false),
+    notify_unoffered_48h = coalesce(p_notify_unoffered_48h, false),
+    notify_request_offered = coalesce(p_notify_request_offered, false),
+    notify_offer_cancelled_or_edited = coalesce(p_notify_offer_cancelled_or_edited, false),
+    notify_ledger_debtor = coalesce(p_notify_ledger_debtor, false),
+    notify_midmonth_inactive = coalesce(p_notify_midmonth_inactive, false)
+  where user_id = auth.uid();
+
+  if not found then
+    raise exception 'Parent profile not found';
+  end if;
 end;
 $$;
 
@@ -1508,7 +1474,7 @@ returns table (
   hours numeric,
   notes text,
   request_id uuid,
-  user_id uuid
+  email text
 )
 language sql
 stable
@@ -1525,8 +1491,9 @@ as $$
     le.hours,
     le.notes,
     le.request_id,
-    le.user_id
+    u.email
   from public.ledger_entries le
+  join auth.users u on u.id = le.created_by
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
   where (p_start_date is null or le.entry_date >= p_start_date)
@@ -1749,16 +1716,14 @@ begin
     to_family_id,
     hours,
     entry_date,
-    request_id,
-    user_id
+    request_id
   )
   values (
     p_from_family_id,
     p_to_family_id,
     p_hours,
     v_entry_date,
-    p_request_id,
-    auth.uid()
+    p_request_id
   )
   returning id into v_id;
 
@@ -1806,16 +1771,14 @@ begin
     to_family_id,
     hours,
     entry_date,
-    notes,
-    user_id
+    notes
   )
   values (
     p_from_family_id,
     p_to_family_id,
     p_hours,
     v_entry_date,
-    p_notes,
-    auth.uid()
+    p_notes
   )
   returning id into v_id;
 
@@ -2158,7 +2121,7 @@ grant execute on function public.rpc_get_family_id() to authenticated, service_r
 grant execute on function public.rpc_is_current_family_active() to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
-grant execute on function public.rpc_upsert_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
+grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
