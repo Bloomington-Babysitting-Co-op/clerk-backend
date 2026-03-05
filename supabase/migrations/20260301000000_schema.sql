@@ -1843,11 +1843,6 @@ as $$
   select
     not exists (
       select 1
-      from public.family_parents fp
-      where fp.family_id = p_family_id
-    )
-    and not exists (
-      select 1
       from public.requests r
       where r.requester_family_id = p_family_id
          or r.assignee_family_id = p_family_id
