@@ -43,12 +43,15 @@ create table public.family_parents (
   family_id uuid not null references public.families(id) on delete cascade,
   name text,
   phone text,
-  notify_new_request boolean not null default false,
-  notify_unoffered_48h boolean not null default false,
-  notify_request_offered boolean not null default false,
-  notify_offer_cancelled_or_edited boolean not null default false,
-  notify_ledger_debtor boolean not null default false,
-  notify_midmonth_inactive boolean not null default false
+  email_request_offered boolean not null default false,
+  email_request_unoffered boolean not null default false,
+  email_request_expired boolean not null default false,
+  email_offer_assigned boolean not null default false,
+  email_offer_completed boolean not null default false,
+  email_ledger_change boolean not null default false,
+  email_request_new boolean not null default false,
+  email_offer_change boolean not null default false,
+  email_midmonth_inactive boolean not null default false
 );
 
 create index family_parents_family_idx on public.family_parents(family_id);
@@ -300,12 +303,15 @@ create or replace function public.rpc_get_my_parent_profile()
 returns table (
   name text,
   phone text,
-  notify_new_request boolean,
-  notify_unoffered_48h boolean,
-  notify_request_offered boolean,
-  notify_offer_cancelled_or_edited boolean,
-  notify_ledger_debtor boolean,
-  notify_midmonth_inactive boolean
+  email_request_offered boolean,
+  email_request_unoffered boolean,
+  email_request_expired boolean,
+  email_offer_assigned boolean,
+  email_offer_completed boolean,
+  email_ledger_change boolean,
+  email_request_new boolean,
+  email_offer_change boolean,
+  email_midmonth_inactive boolean
 )
 language sql
 stable
@@ -315,12 +321,15 @@ as $$
   select
     fp.name,
     fp.phone,
-    fp.notify_new_request,
-    fp.notify_unoffered_48h,
-    fp.notify_request_offered,
-    fp.notify_offer_cancelled_or_edited,
-    fp.notify_ledger_debtor,
-    fp.notify_midmonth_inactive
+    fp.email_request_offered,
+    fp.email_request_unoffered,
+    fp.email_request_expired,
+    fp.email_offer_assigned,
+    fp.email_offer_completed,
+    fp.email_ledger_change,
+    fp.email_request_new,
+    fp.email_offer_change,
+    fp.email_midmonth_inactive
   from public.family_parents fp
   where fp.user_id = auth.uid();
 $$;
@@ -329,12 +338,15 @@ $$;
 create or replace function public.rpc_update_my_parent_profile(
   p_name text default null,
   p_phone text default null,
-  p_notify_new_request boolean default false,
-  p_notify_unoffered_48h boolean default false,
-  p_notify_request_offered boolean default false,
-  p_notify_offer_cancelled_or_edited boolean default false,
-  p_notify_ledger_debtor boolean default false,
-  p_notify_midmonth_inactive boolean default false
+  p_email_request_offered boolean default false,
+  p_email_request_unoffered boolean default false,
+  p_email_request_expired boolean default false,
+  p_email_offer_assigned boolean default false,
+  p_email_offer_completed boolean default false,
+  p_email_ledger_change boolean default false,
+  p_email_request_new boolean default false,
+  p_email_offer_change boolean default false,
+  p_email_midmonth_inactive boolean default false
 )
 returns void
 language plpgsql
@@ -351,12 +363,15 @@ begin
     family_id = v_family_id,
     name = nullif(btrim(p_name), ''),
     phone = nullif(btrim(p_phone), ''),
-    notify_new_request = coalesce(p_notify_new_request, false),
-    notify_unoffered_48h = coalesce(p_notify_unoffered_48h, false),
-    notify_request_offered = coalesce(p_notify_request_offered, false),
-    notify_offer_cancelled_or_edited = coalesce(p_notify_offer_cancelled_or_edited, false),
-    notify_ledger_debtor = coalesce(p_notify_ledger_debtor, false),
-    notify_midmonth_inactive = coalesce(p_notify_midmonth_inactive, false)
+    email_request_offered = coalesce(p_email_request_offered, false),
+    email_request_unoffered = coalesce(p_email_request_unoffered, false),
+    email_request_expired = coalesce(p_email_request_expired, false),
+    email_offer_assigned = coalesce(p_email_offer_assigned, false),
+    email_offer_completed = coalesce(p_email_offer_completed, false),
+    email_ledger_change = coalesce(p_email_ledger_change, false),
+    email_request_new = coalesce(p_email_request_new, false),
+    email_offer_change = coalesce(p_email_offer_change, false),
+    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false)
   where user_id = auth.uid();
 
   if not found then
