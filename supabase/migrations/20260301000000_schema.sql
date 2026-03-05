@@ -13,6 +13,12 @@ set row_security = off;
 -- Extension: required for gen_random_uuid()
 create extension if not exists "pgcrypto" with schema "extensions";
 
+-- Table: site_settings for simple key/value site configuration
+create table if not exists public.site_settings (
+  key text primary key,
+  value jsonb not null
+);
+
 -- Table: families stores shared-family metadata and admin flag
 create table public.families (
   id uuid primary key default gen_random_uuid(),
@@ -2052,6 +2058,103 @@ begin
 end;
 $$;
 
+-- RPC: get dashboard banner
+create or replace function public.rpc_get_dashboard_banner()
+returns table (enabled boolean, text text, bg_color text, text_color text)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    coalesce((s.value->>'enabled')::boolean, false) as enabled,
+    s.value->>'text' as text,
+    coalesce(s.value->>'bg_color', '#F87171') as bg_color,
+    coalesce(s.value->>'text_color', '#FFFFFF') as text_color
+  from public.site_settings s
+  where s.key = 'dashboard_banner'
+  limit 1;
+$$;
+
+-- RPC: admin upsert dashboard banner
+create or replace function public.rpc_admin_upsert_dashboard_banner(
+  p_enabled boolean,
+  p_text text,
+  p_bg_color text,
+  p_text_color text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  insert into public.site_settings (key, value)
+  values (
+    'dashboard_banner',
+    jsonb_build_object(
+      'enabled', coalesce(p_enabled, false),
+      'text', coalesce(p_text, ''),
+      'bg_color', coalesce(p_bg_color, '#F87171'),
+      'text_color', coalesce(p_text_color, '#FFFFFF')
+    )
+  )
+  on conflict (key) do update set value = excluded.value;
+end;
+$$;
+
+-- RPC: get dashboard links
+create or replace function public.rpc_get_dashboard_links()
+returns table (link_url text, link_text text, link_row integer, link_order integer)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    (elem->>'url') as link_url,
+    (elem->>'text') as link_text,
+    coalesce((elem->>'row')::integer, 1) as link_row,
+    coalesce((elem->>'order')::integer, 0) as link_order
+  from (
+    select coalesce(s.value, '[]'::jsonb) as arr
+    from public.site_settings s
+    where s.key = 'dashboard_links'
+    limit 1
+  ) as t,
+  jsonb_array_elements(t.arr) as elem;
+$$;
+
+-- RPC: admin upsert dashboard links (expects a JSON array of objects with url, text, row, order)
+create or replace function public.rpc_admin_upsert_dashboard_links(p_links jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.rpc_get_admin_status() then
+    raise exception 'Admin only';
+  end if;
+
+  if p_links is null then
+    p_links := '[]'::jsonb;
+  end if;
+
+  if jsonb_typeof(p_links) <> 'array' then
+    raise exception 'Links must be a JSON array';
+  end if;
+
+  insert into public.site_settings (key, value)
+  values ('dashboard_links', p_links)
+  on conflict (key) do update set value = excluded.value;
+end;
+$$;
+
 -- Security: enforce RPC-only access for anon/authenticated
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
@@ -2099,10 +2202,14 @@ grant execute on function public.rpc_list_requests_completed_for_entry() to auth
 grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_list_families_full() to authenticated, service_role;
 grant execute on function public.rpc_create_ledger_entry(uuid, uuid, numeric, date, uuid) to authenticated, service_role;
+grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
 grant execute on function public.rpc_admin_list_families() to authenticated, service_role;
 grant execute on function public.rpc_admin_create_family(text) to authenticated, service_role;
 grant execute on function public.rpc_admin_update_family(uuid, boolean, boolean, date, date, date) to authenticated, service_role;
 grant execute on function public.rpc_admin_delete_family(uuid) to authenticated, service_role;
 grant execute on function public.rpc_admin_list_users() to authenticated, service_role;
 grant execute on function public.rpc_admin_update_user_family(uuid, uuid) to authenticated, service_role;
-grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
+grant execute on function public.rpc_get_dashboard_banner() to authenticated, service_role;
+grant execute on function public.rpc_admin_upsert_dashboard_banner(boolean, text, text, text) to authenticated, service_role;
+grant execute on function public.rpc_get_dashboard_links() to authenticated, service_role;
+grant execute on function public.rpc_admin_upsert_dashboard_links(jsonb) to authenticated, service_role;
