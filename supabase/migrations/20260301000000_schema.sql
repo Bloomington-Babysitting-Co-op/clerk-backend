@@ -197,8 +197,7 @@ set search_path = public
 as $$
 begin
   update public.requests
-  set status = 'expired',
-      assignee_family_id = null
+  set status = 'expired'
   where date < public.rpc_local_today()
     and status in ('open', 'offered');
 
@@ -293,55 +292,6 @@ as $$
     where p.id = me.family_id
       and p.is_admin = true
   );
-$$;
-
--- RPC: link an existing auth user email to the current shared family
-create or replace function public.rpc_add_family_member_by_email(p_email text)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_family_id uuid;
-  v_target_user_id uuid;
-  v_existing_family_id uuid;
-begin
-  if auth.uid() is null then
-    raise exception 'Not authenticated';
-  end if;
-
-  if not public.rpc_get_admin_status() then
-    raise exception 'Admin only';
-  end if;
-
-  if p_email is null or btrim(p_email) = '' then
-    raise exception 'Email is required';
-  end if;
-
-  v_family_id := public.rpc_get_family_id();
-
-  select u.id into v_target_user_id
-  from auth.users u
-  where lower(u.email) = lower(btrim(p_email));
-
-  if v_target_user_id is null then
-    raise exception 'No auth user found for that email';
-  end if;
-
-  select fm.family_id into v_existing_family_id
-  from public.family_parents fm
-  where fm.user_id = v_target_user_id;
-
-  if v_existing_family_id is not null and v_existing_family_id <> v_family_id then
-    raise exception 'That email is already linked to a different family';
-  end if;
-
-  insert into public.family_parents (user_id, family_id)
-  values (v_target_user_id, v_family_id)
-  on conflict (user_id) do update
-  set family_id = excluded.family_id;
-end;
 $$;
 
 -- RPC: list linked login emails for the current shared family
@@ -1225,8 +1175,30 @@ as $$
   cross join me;
 $$;
 
--- RPC: dashboard all non-terminal unassigned requests
-create or replace function public.rpc_list_requests_other_open()
+-- RPC: whether current user completed a request this calendar month
+create or replace function public.rpc_has_completed_request_this_month()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (
+    select public.rpc_get_family_id() as family_id
+  )
+  select exists (
+    select 1
+    from public.ledger_entries le
+    join public.requests r on r.id = le.request_id
+    cross join me
+    where le.from_family_id = me.family_id
+      and le.entry_date >= public.rpc_local_month_start()
+      and le.entry_date < public.rpc_local_month_end()
+  );
+$$;
+
+-- RPC: dashboard all available requests
+create or replace function public.rpc_list_requests_dashboard_other()
 returns table (
   id uuid,
   requester_family_id uuid,
@@ -1285,7 +1257,7 @@ end;
 $$;
 
 -- RPC: dashboard active requests created by current user
-create or replace function public.rpc_list_requests_my_family_future()
+create or replace function public.rpc_list_requests_dashboard_mine()
 returns table (
   id uuid,
   family_name text,
@@ -1328,15 +1300,7 @@ begin
   join public.families f on f.id = r.requester_family_id
   cross join me
   where r.requester_family_id = me.family_id
-    and r.status not in ('completed', 'cancelled', 'expired')
-    and (
-      (r.date is not null and r.date > public.rpc_local_today())
-      or (
-        r.date = public.rpc_local_today()
-        and (r.end_time is null or r.end_time >= (now() at time zone 'America/Indiana/Indianapolis')::time)
-      )
-      or (r.date is null and coalesce(r.flexible_date, false))
-    )
+    and r.status in ('open', 'offered', 'assigned')
   order by r.date asc nulls first
      ,r.start_time asc nulls first
      ,r.id;
@@ -1344,7 +1308,7 @@ end;
 $$;
 
 -- RPC: dashboard requests from other families that current family has submitted offers on
-create or replace function public.rpc_list_offers_my_submitted()
+create or replace function public.rpc_list_offers_dashboard_mine()
 returns table (
   id uuid,
   requester_family_id uuid,
@@ -1393,35 +1357,18 @@ begin
   cross join me
   where o.family_id = me.family_id
     and r.requester_family_id <> me.family_id
-    and r.status not in ('completed', 'cancelled', 'expired')
+    and r.status in ('open', 'offered', 'assigned')
+    and not exists (
+      select 1
+      from public.offers o
+      where o.request_id = r.id
+        and o.assignee_family_id <> me.family_id
+    )
   order by r.date asc nulls first
     ,r.start_time asc nulls first
     ,o.created_at desc
     ,r.id;
 end;
-$$;
-
--- RPC: whether current user completed a babysit this calendar month
-create or replace function public.rpc_has_completed_sit_this_month()
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select exists (
-    select 1
-    from public.ledger_entries le
-    join public.requests r on r.id = le.request_id
-    cross join me
-    where le.from_family_id = me.family_id
-      and r.type = 'babysit'
-      and le.entry_date >= public.rpc_local_month_start()
-      and le.entry_date < public.rpc_local_month_end()
-  );
 $$;
 
 -- RPC: fetch current user's family details for profile page
@@ -2171,7 +2118,6 @@ grant execute on function public.rpc_list_request_children(uuid) to authenticate
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_family_id() to authenticated, service_role;
 grant execute on function public.rpc_is_current_family_active() to authenticated, service_role;
-grant execute on function public.rpc_add_family_member_by_email(text) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
 grant execute on function public.rpc_upsert_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
@@ -2186,10 +2132,10 @@ grant execute on function public.rpc_request_set_assignee(uuid, uuid) to authent
 grant execute on function public.rpc_request_clear_assignee(uuid) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
-grant execute on function public.rpc_list_requests_my_family_future() to authenticated, service_role;
-grant execute on function public.rpc_list_requests_other_open() to authenticated, service_role;
-grant execute on function public.rpc_list_offers_my_submitted() to authenticated, service_role;
-grant execute on function public.rpc_has_completed_sit_this_month() to authenticated, service_role;
+grant execute on function public.rpc_list_requests_dashboard_other() to authenticated, service_role;
+grant execute on function public.rpc_list_requests_dashboard_mine() to authenticated, service_role;
+grant execute on function public.rpc_list_offers_dashboard_mine() to authenticated, service_role;
+grant execute on function public.rpc_has_completed_request_this_month() to authenticated, service_role;
 grant execute on function public.rpc_get_admin_status() to authenticated, service_role;
 grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
 grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text) to authenticated, service_role;
