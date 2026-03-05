@@ -25,8 +25,8 @@ create table public.families (
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
-  is_active boolean default true,
-  is_admin boolean default false
+  is_active boolean not null default true,
+  is_admin boolean not null default false
 );
 
 create index families_is_admin_idx on public.families(is_admin);
@@ -227,7 +227,7 @@ begin
       select 1
       from public.families f
       where f.id = v_family_id
-        and coalesce(f.is_active, true) = false
+        and f.is_active = false
     ) then
       raise exception 'Family is inactive';
     end if;
@@ -263,7 +263,7 @@ as $$
   with me as (
     select public.rpc_get_family_id() as family_id
   )
-  select coalesce(f.is_active, true)
+  select f.is_active
   from public.families f
   cross join me
   where f.id = me.family_id;
@@ -1744,6 +1744,7 @@ as $$
   from public.families f
   left join parent_json pj on pj.family_id = f.id
   left join child_json cj on cj.family_id = f.id
+  where f.is_active = true
   order by lower(coalesce(f.name, '')), f.id;
 $$;
 
@@ -1880,8 +1881,8 @@ as $$
   select
     f.id,
     f.name,
-    coalesce(f.is_active, true) as is_active,
-    coalesce(f.is_admin, false) as is_admin,
+    f.is_active,
+    f.is_admin,
     f.admin_date_joined,
     f.admin_last_background_check,
     f.admin_last_dues_payment,
@@ -1893,7 +1894,9 @@ as $$
     public.rpc_admin_family_is_deletable(f.id) as can_delete
   from public.families f
   where public.rpc_get_admin_status()
-  order by lower(coalesce(f.name, '')), f.id;
+  order by is_admin desc,
+    is_active desc,
+    lower(coalesce(f.name, '')), f.id;
 $$;
 
 -- RPC: create a family by name for admin management
@@ -2002,7 +2005,7 @@ as $$
     u.email,
     fp.family_id,
     f.name as family_name,
-    coalesce(f.is_active, true) as family_is_active,
+    f.is_active as family_is_active,
     u.created_at,
     u.last_sign_in_at,
     public.rpc_admin_family_is_deletable(fp.family_id) as can_delete
