@@ -69,7 +69,7 @@ create index family_children_date_of_birth_idx on public.family_children(date_of
 -- Table: requests stores all help requests and their lifecycle state by family
 create table public.requests (
   id uuid primary key default gen_random_uuid(),
-  requester_family_id uuid not null references public.families(id) on delete cascade,
+  requester_family_id uuid not null references public.families(id),
   status text not null,
   type text not null,
   notes text,
@@ -147,7 +147,7 @@ create table public.ledger_entries (
   entry_date date not null default (now() at time zone 'America/Indiana/Indianapolis')::date,
   hours numeric not null check (hours > 0),
   notes text,
-  request_id uuid references public.requests(id) on delete cascade,
+  request_id uuid references public.requests(id),
   created_at timestamptz default now()
 );
 
@@ -2009,10 +2009,10 @@ as $$
     f.is_active as family_is_active,
     u.created_at,
     u.last_sign_in_at,
-    public.rpc_admin_family_is_deletable(fp.family_id) as can_delete
+    coalesce(public.rpc_admin_family_is_deletable(fp.family_id), true) as can_delete
   from auth.users u
-  join public.family_parents fp on fp.user_id = u.id
-  join public.families f on f.id = fp.family_id
+  left join public.family_parents fp on fp.user_id = u.id
+  left join public.families f on f.id = fp.family_id
   where public.rpc_get_admin_status()
   order by lower(coalesce(u.email, '')), u.id;
 $$;
@@ -2048,13 +2048,10 @@ begin
     raise exception 'Family not found';
   end if;
 
-  update public.family_parents fp
-  set family_id = p_family_id
-  where fp.user_id = p_user_id;
-
-  if not found then
-    raise exception 'User is not linked to a family';
-  end if;
+  insert into public.family_parents (user_id, family_id)
+  values (p_user_id, p_family_id)
+  on conflict (user_id) do update
+  set family_id = excluded.family_id;
 end;
 $$;
 
