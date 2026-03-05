@@ -148,8 +148,9 @@ create table public.ledger_entries (
   hours numeric not null check (hours > 0),
   notes text,
   request_id uuid references public.requests(id),
-  constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null),
-  created_at timestamptz default now()
+  user_id uuid references auth.users(id),
+  created_at timestamptz default now(),
+  constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null)
 );
 
 create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
@@ -1505,7 +1506,9 @@ returns table (
   to_family_name text,
   entry_date date,
   hours numeric,
-  request_id uuid
+  notes text,
+  request_id uuid,
+  user_id uuid
 )
 language sql
 stable
@@ -1520,7 +1523,9 @@ as $$
     tf.name as to_family_name,
     le.entry_date,
     le.hours,
-    le.request_id
+    le.notes,
+    le.request_id,
+    le.user_id
   from public.ledger_entries le
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
@@ -1739,8 +1744,22 @@ begin
     raise exception 'Hours must be greater than zero';
   end if;
 
-  insert into public.ledger_entries (from_family_id, to_family_id, hours, entry_date, request_id)
-  values (p_from_family_id, p_to_family_id, p_hours, v_entry_date, p_request_id)
+  insert into public.ledger_entries (
+    from_family_id,
+    to_family_id,
+    hours,
+    entry_date,
+    request_id,
+    user_id
+  )
+  values (
+    p_from_family_id,
+    p_to_family_id,
+    p_hours,
+    v_entry_date,
+    p_request_id,
+    auth.uid()
+  )
   returning id into v_id;
 
   return v_id;
@@ -1782,8 +1801,22 @@ begin
 
   v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
 
-  insert into public.ledger_entries (from_family_id, to_family_id, hours, entry_date, notes)
-  values (p_from_family_id, p_to_family_id, p_hours, v_entry_date, p_notes)
+  insert into public.ledger_entries (
+    from_family_id,
+    to_family_id,
+    hours,
+    entry_date,
+    notes,
+    user_id
+  )
+  values (
+    p_from_family_id,
+    p_to_family_id,
+    p_hours,
+    v_entry_date,
+    p_notes,
+    auth.uid()
+  )
   returning id into v_id;
 
   return v_id;
