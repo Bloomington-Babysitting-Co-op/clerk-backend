@@ -26,8 +26,8 @@ create table public.families (
   address text,
   emergency_contacts jsonb,
   pets text,
-  family_photo_url text,
   notes text,
+  family_photo_url text,
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
@@ -522,8 +522,8 @@ returns table (
   address text,
   emergency_contacts jsonb,
   pets text,
-  family_photo_url text,
   notes text,
+  family_photo_url text,
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
@@ -543,8 +543,8 @@ as $$
     p.address,
     p.emergency_contacts,
     p.pets,
-    p.family_photo_url,
     p.notes,
+    p.family_photo_url,
     p.admin_date_joined,
     p.admin_last_background_check,
     p.admin_last_dues_payment,
@@ -560,7 +560,6 @@ create or replace function public.rpc_update_my_family_details(
   p_address text default null,
   p_emergency_contacts jsonb default null,
   p_pets text default null,
-  p_family_photo_url text default null,
   p_notes text default null
 )
 returns void
@@ -592,8 +591,29 @@ begin
       address = p_address,
       emergency_contacts = p_emergency_contacts,
       pets = p_pets,
-      family_photo_url = p_family_photo_url,
       notes = p_notes
+  where id = v_family_id;
+
+  if not found then
+    raise exception 'Family not found';
+  end if;
+end;
+$$;
+
+-- RPC: update only the family's photo path/url
+create or replace function public.rpc_update_my_family_photo(
+  p_family_photo_url text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid := public.rpc_my_family_id();
+begin
+  update public.families
+  set family_photo_url = p_family_photo_url
   where id = v_family_id;
 
   if not found then
@@ -775,8 +795,8 @@ returns table (
   emergency_contacts jsonb,
   children jsonb,
   pets text,
-  family_photo_url text,
-  notes text
+  notes text,
+  family_photo_url text
 )
 language sql
 stable
@@ -824,8 +844,8 @@ as $$
     coalesce(f.emergency_contacts, '[]'::jsonb) as emergency_contacts,
     coalesce(cj.children, '[]'::jsonb) as children,
     f.pets,
-    f.family_photo_url,
-    f.notes
+    f.notes,
+    f.family_photo_url
   from public.families f
   left join parent_json pj on pj.family_id = f.id
   left join child_json cj on cj.family_id = f.id
@@ -2133,7 +2153,8 @@ grant execute on function public.rpc_list_my_offers() to authenticated, service_
 -- Profile
 grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
 grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
-grant execute on function public.rpc_update_my_family_details(text, text, jsonb, text, text, text) to authenticated, service_role;
+grant execute on function public.rpc_update_my_family_details(text, text, jsonb, text, text) to authenticated, service_role;
+grant execute on function public.rpc_update_my_family_photo(text) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
