@@ -1621,8 +1621,8 @@ as $$
     le.id,
     le.entry_date,
     le.hours,
-    coalesce(ff.name, 'N/A') as from_family_name,
-    coalesce(tf.name, 'N/A') as to_family_name,
+    ff.name as from_family_name,
+    tf.name as to_family_name,
     le.notes,
     le.request_id,
     u.email
