@@ -795,7 +795,7 @@ as $$
           'email', u.email,
           'phone', fp.phone
         )
-        order by fp.name asc null first, u.email
+        order by fp.name asc nulls first, u.email
       ) as parents
     from public.family_parents fp
     join auth.users u on u.id = fp.user_id
