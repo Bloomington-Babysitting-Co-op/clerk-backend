@@ -22,7 +22,7 @@ create table if not exists public.site_settings (
 -- Table: families stores shared-family metadata and admin flag
 create table public.families (
   id uuid primary key default gen_random_uuid(),
-  name text,
+  name text not null,
   address text,
   emergency_contacts jsonb,
   pets text,
@@ -183,14 +183,40 @@ as $$
   select date_trunc('month', public.rpc_local_today())::date;
 $$;
 
-create or replace function public.rpc_local_month_end()
-returns date
+-- Function: check if a family has any ledger entries in the current month
+create or replace function public.rpc_active_this_month(p_family_id uuid)
+returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select (public.rpc_local_month_start() + interval '1 month')::date;
+  select exists (
+    select 1
+    from public.ledger_entries le
+    where le.entry_date >= public.rpc_local_month_start()
+      and p_family_id in (le.from_family_id, le.to_family_id)
+  );
+$$;
+
+-- Function: calculate hours balance as of a given date
+create or replace function public.rpc_hours_balance_as_of(p_family_id uuid, p_date date)
+returns numeric
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(sum(
+    case
+      when le.to_family_id = p_family_id then le.hours
+      when le.from_family_id = p_family_id then -le.hours
+      else 0
+    end
+  ), 0) as hours_balance
+  from public.ledger_entries le
+  where p_family_id in (le.from_family_id, le.to_family_id)
+    and le.entry_date <= p_date;
 $$;
 
 -- Function: refresh request statuses based on date lifecycle
@@ -214,7 +240,7 @@ end;
 $$;
 
 -- Function: get the current auth user's family id
-create or replace function public.rpc_get_family_id()
+create or replace function public.rpc_my_family_id()
 returns uuid
 language plpgsql
 security definer
@@ -247,40 +273,221 @@ end;
 $$;
 
 -- RPC: whether current user's family is active
-create or replace function public.rpc_is_current_family_active()
+create or replace function public.rpc_my_is_active()
 returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
   select f.is_active
   from public.families f
-  cross join me
-  where f.id = me.family_id;
+  where f.id = public.rpc_my_family_id();
 $$;
 
 -- RPC: whether current user is an admin
-create or replace function public.rpc_get_admin_status()
+create or replace function public.rpc_my_is_admin()
 returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
+  select f.is_admin
+  from public.families f
+  where f.id = public.rpc_my_family_id();
+$$;
+
+-- RPC: whether current user completed a request this calendar month
+create or replace function public.rpc_my_active_this_month()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.rpc_active_this_month(public.rpc_my_family_id());
+$$;
+
+-- RPC: current user's net ledger balance
+create or replace function public.rpc_my_hours_balance()
+returns numeric
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.rpc_hours_balance_as_of(public.rpc_my_family_id(), public.rpc_local_today());
+$$;
+
+-- RPC: dashboard all available requests
+create or replace function public.rpc_list_other_requests()
+returns table (
+  id uuid,
+  requester_family_id uuid,
+  family_name text,
+  status text,
+  type text,
+  notes text,
+  date date,
+  start_time time,
+  end_time time,
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  hours numeric
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
   with me as (
-    select public.rpc_get_family_id() as family_id
+    select public.rpc_my_family_id() as family_id
   )
-  select exists (
-    select 1
-    from public.families p
-    cross join me
-    where p.id = me.family_id
-      and p.is_admin = true
-  );
+  select
+    r.id,
+    r.requester_family_id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
+    r.start_time,
+    r.end_time,
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time,
+    r.hours
+  from public.requests r
+  join public.families f on f.id = r.requester_family_id
+  cross join me
+  where r.requester_family_id <> me.family_id
+    and r.status in ('open', 'offered')
+    and not exists (
+      select 1
+      from public.offers o
+      where o.request_id = r.id
+        and o.family_id = me.family_id
+    )
+  order by
+    r.date asc nulls first,
+    r.start_time asc nulls first,
+    r.id;
+end;
+$$;
+
+-- RPC: dashboard active requests created by current user
+create or replace function public.rpc_list_my_requests()
+returns table (
+  id uuid,
+  family_name text,
+  status text,
+  type text,
+  notes text,
+  date date,
+  start_time time,
+  end_time time,
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  hours numeric
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
+  select
+    r.id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
+    r.start_time,
+    r.end_time,
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time,
+    r.hours
+  from public.requests r
+  join public.families f on f.id = r.requester_family_id
+  cross join me
+  where r.requester_family_id = me.family_id
+    and r.status in ('open', 'offered', 'assigned')
+  order by
+    r.date asc nulls first,
+    r.start_time asc nulls first,
+    r.id;
+end;
+$$;
+
+-- RPC: dashboard requests from other families that current family has submitted offers on
+create or replace function public.rpc_list_my_offers()
+returns table (
+  id uuid,
+  requester_family_id uuid,
+  family_name text,
+  status text,
+  type text,
+  notes text,
+  date date,
+  start_time time,
+  end_time time,
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  hours numeric,
+  offer_created_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  return query
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
+  select
+    r.id,
+    r.requester_family_id,
+    f.name as family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
+    r.start_time,
+    r.end_time,
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time,
+    r.hours,
+    o.created_at as offer_created_at
+  from public.offers o
+  join public.requests r on r.id = o.request_id
+  join public.families f on f.id = r.requester_family_id
+  cross join me
+  where o.family_id = me.family_id
+    and (r.status = 'offered' or (r.status = 'assigned' and r.assignee_family_id = me.family_id))
+  order by
+    r.date asc nulls first,
+    r.start_time asc nulls first,
+    o.created_at desc,
+    r.id;
+end;
 $$;
 
 -- RPC: list linked login emails for the current shared family
@@ -291,11 +498,174 @@ stable
 security definer
 set search_path = public
 as $$
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
   select u.email
   from public.family_parents fm
   join auth.users u on u.id = fm.user_id
-  where fm.family_id = public.rpc_get_family_id()
+  cross join me
+  where fm.family_id = me.family_id
   order by u.email;
+$$;
+
+-- RPC: fetch current user's family details for profile page
+create or replace function public.rpc_get_my_family_details()
+returns table (
+  id uuid,
+  name text,
+  address text,
+  emergency_contacts jsonb,
+  pets text,
+  family_photo_url text,
+  notes text,
+  admin_date_joined date,
+  admin_last_background_check date,
+  admin_last_dues_payment date,
+  is_admin boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
+  select
+    p.id,
+    p.name,
+    p.address,
+    p.emergency_contacts,
+    p.pets,
+    p.family_photo_url,
+    p.notes,
+    p.admin_date_joined,
+    p.admin_last_background_check,
+    p.admin_last_dues_payment,
+    p.is_admin
+  from public.families p
+  cross join me
+  where p.id = me.family_id;
+$$;
+
+-- RPC: update current user's family details
+create or replace function public.rpc_update_my_family_details(
+  p_name text default null,
+  p_address text default null,
+  p_emergency_contacts jsonb default null,
+  p_pets text default null,
+  p_family_photo_url text default null,
+  p_notes text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+  v_emergency_contacts jsonb;
+begin
+  v_family_id := public.rpc_my_family_id();
+  v_emergency_contacts := p_emergency_contacts;
+
+  if v_emergency_contacts is not null then
+    if jsonb_typeof(v_emergency_contacts) <> 'array' then
+      raise exception 'Emergency contacts must be a JSON array';
+    end if;
+
+    if exists (
+      select 1
+      from jsonb_array_elements(v_emergency_contacts) as contact
+      where jsonb_typeof(contact) <> 'object'
+         or nullif(btrim(contact->>'name'), '') is null
+         or nullif(btrim(contact->>'phone'), '') is null
+    ) then
+      raise exception 'Each emergency contact must include non-empty name and phone';
+    end if;
+  end if;
+
+  update public.families
+  set name = p_name,
+      address = p_address,
+      emergency_contacts = v_emergency_contacts,
+      pets = p_pets,
+      family_photo_url = p_family_photo_url,
+      notes = p_notes
+  where id = v_family_id;
+
+  if not found then
+    raise exception 'Family not found';
+  end if;
+end;
+$$;
+
+-- RPC: list children for the current shared family
+create or replace function public.rpc_list_my_family_children()
+returns table (
+  id uuid,
+  name text,
+  date_of_birth date,
+  allergies text,
+  notes text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
+  select
+    fc.id,
+    fc.name,
+    fc.date_of_birth,
+    fc.allergies,
+    fc.notes
+  from public.family_children fc
+  cross join me
+  where fc.family_id = me.family_id
+  order by
+    fc.date_of_birth asc,
+    fc.id asc;
+$$;
+
+-- RPC: replace all children for the current shared family from JSON array payload
+create or replace function public.rpc_replace_my_family_children(p_children jsonb default '[]'::jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+begin
+  v_family_id := public.rpc_my_family_id();
+
+  delete from public.family_children
+  where family_id = v_family_id;
+
+  insert into public.family_children (
+    family_id,
+    name,
+    date_of_birth,
+    allergies,
+    notes
+  )
+  select
+    v_family_id,
+    btrim(child->>'name') as name,
+    case
+      when nullif(child->>'date_of_birth', '') is null then null
+      else to_date((child->>'date_of_birth') || '-15', 'YYYY-MM-DD')
+    end as date_of_birth,
+    nullif(btrim(child->>'allergies'), '') as allergies,
+    nullif(btrim(child->>'notes'), '') as notes
+  from jsonb_array_elements(coalesce(p_children, '[]'::jsonb)) as child
+  where btrim(coalesce(child->>'name', '')) <> '';
+end;
 $$;
 
 -- RPC: fetch current auth user's parent profile fields
@@ -356,7 +726,7 @@ as $$
 declare
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   update public.family_parents
   set
@@ -380,13 +750,35 @@ begin
 end;
 $$;
 
--- RPC: list children for the current shared family
-create or replace function public.rpc_list_my_family_children()
+-- RPC: list families for filter selectors
+create or replace function public.rpc_list_families_for_filters()
 returns table (
   id uuid,
-  name text,
-  date_of_birth date,
-  allergies text,
+  name text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select p.id, coalesce(p.name, p.id::text) as name
+  from public.families p
+  order by p.name nulls last, p.id;
+$$;
+
+-- RPC: list full family card details for families page
+create or replace function public.rpc_list_families_active()
+returns table (
+  family_id uuid,
+  family_name text,
+  joined_date date,
+  is_admin boolean,
+  address text,
+  parents jsonb,
+  emergency_contacts jsonb,
+  children jsonb,
+  pets text,
+  family_photo_url text,
   notes text
 )
 language sql
@@ -394,46 +786,54 @@ stable
 security definer
 set search_path = public
 as $$
-  select fc.id, fc.name, fc.date_of_birth, fc.allergies, fc.notes
-  from public.family_children fc
-  where fc.family_id = public.rpc_get_family_id()
-  order by fc.date_of_birth asc, fc.id asc;
-$$;
-
--- RPC: replace all children for the current shared family from JSON array payload
-create or replace function public.rpc_replace_my_family_children(p_children jsonb default '[]'::jsonb)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_family_id uuid;
-begin
-  v_family_id := public.rpc_get_family_id();
-
-  delete from public.family_children
-  where family_id = v_family_id;
-
-  insert into public.family_children (
-    family_id,
-    name,
-    date_of_birth,
-    allergies,
-    notes
+  with parent_json as (
+    select
+      fp.family_id,
+      jsonb_agg(
+        jsonb_build_object(
+          'name', fp.name,
+          'email', u.email,
+          'phone', fp.phone
+        )
+        order by fp.name asc null first, u.email
+      ) as parents
+    from public.family_parents fp
+    join auth.users u on u.id = fp.user_id
+    group by fp.family_id
+  ),
+  child_json as (
+    select
+      fc.family_id,
+      jsonb_agg(
+        jsonb_build_object(
+          'id', fc.id,
+          'name', fc.name,
+          'date_of_birth', fc.date_of_birth,
+          'allergies', fc.allergies,
+          'notes', fc.notes
+        )
+        order by fc.date_of_birth, fc.name
+      ) as children
+    from public.family_children fc
+    group by fc.family_id
   )
   select
-    v_family_id,
-    btrim(child->>'name') as name,
-    case
-      when nullif(child->>'date_of_birth', '') is null then null
-      else to_date((child->>'date_of_birth') || '-15', 'YYYY-MM-DD')
-    end as date_of_birth,
-    nullif(btrim(child->>'allergies'), '') as allergies,
-    nullif(btrim(child->>'notes'), '') as notes
-  from jsonb_array_elements(coalesce(p_children, '[]'::jsonb)) as child
-  where btrim(coalesce(child->>'name', '')) <> '';
-end;
+    f.id as family_id,
+    f.name as family_name,
+    f.admin_date_joined as joined_date,
+    f.is_admin,
+    f.address,
+    coalesce(pj.parents, '[]'::jsonb) as parents,
+    coalesce(f.emergency_contacts, '[]'::jsonb) as emergency_contacts,
+    coalesce(cj.children, '[]'::jsonb) as children,
+    f.pets,
+    f.family_photo_url,
+    f.notes
+  from public.families f
+  left join parent_json pj on pj.family_id = f.id
+  left join child_json cj on cj.family_id = f.id
+  where f.is_active = true
+  order by f.name, f.admin_date_joined;
 $$;
 
 -- RPC: list requests with optional date filters
@@ -473,18 +873,41 @@ begin
     r.notes
   from public.requests r
   join public.families f on f.id = r.requester_family_id
-  where (p_start_date is null or (r.date is not null and r.date >= p_start_date))
-    and (p_end_date is null or (r.date is not null and r.date <= p_end_date))
+  where (p_start_date is null or r.date >= p_start_date)
+    and (p_end_date is null or r.date <= p_end_date)
     and (p_family_id is null or r.requester_family_id = p_family_id)
-  order by r.date asc nulls first
-     ,r.start_time asc nulls first
-     ,r.id;
+  order by
+    r.date asc nulls first,
+    r.start_time asc nulls first,
+    r.id;
 end;
 $$;
 
 -- RPC: get full request details for request view page
 create or replace function public.rpc_get_request(p_request_id uuid)
-returns public.requests
+returns table (
+  id uuid,
+  requester_family_id uuid,
+  requester_family_name text,
+  status text,
+  type text,
+  notes text,
+  date date,
+  start_time time,
+  end_time time,
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  hours numeric,
+  sit_location text,
+  meal_required boolean,
+  meal_prepared_by_sitter boolean,
+  sitters_children_welcome boolean,
+  origin text,
+  destination text,
+  assignee_family_id uuid,
+  created_at timestamptz
+)
 language plpgsql
 security definer
 set search_path = public
@@ -492,11 +915,32 @@ as $$
 begin
   perform public.rpc_refresh_request_statuses();
 
-  return (
-    select r
-    from public.requests r
-    where r.id = p_request_id
-  );
+  return query
+  select
+    r.id,
+    r.requester_family_id,
+    f.name as requester_family_name,
+    r.status,
+    r.type,
+    r.notes,
+    r.date,
+    r.start_time,
+    r.end_time,
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time,
+    r.hours,
+    r.sit_location,
+    r.meal_required,
+    r.meal_prepared_by_sitter,
+    r.sitters_children_welcome,
+    r.origin,
+    r.destination,
+    r.assignee_family_id,
+    r.created_at
+  from public.requests r
+  join public.families f on f.id = r.requester_family_id
+  where r.id = p_request_id;
 end;
 $$;
 
@@ -514,11 +958,18 @@ stable
 security definer
 set search_path = public
 as $$
-  select fc.id, fc.name, fc.date_of_birth, fc.allergies, fc.notes
+  select
+    fc.id,
+    fc.name,
+    fc.date_of_birth,
+    fc.allergies,
+    fc.notes
   from public.request_children rc
   join public.family_children fc on fc.id = rc.child_id
   where rc.request_id = p_request_id
-  order by fc.name asc, fc.id asc;
+  order by
+    fc.date_of_birth,
+    fc.name asc;
 $$;
 
 -- RPC: list offers for a request
@@ -529,7 +980,7 @@ returns table (
   family_id uuid,
   family_name text,
   hours_balance numeric,
-  has_used_this_month boolean,
+  active_this_month boolean,
   notes text,
   created_at timestamptz
 )
@@ -538,49 +989,21 @@ stable
 security definer
 set search_path = public
 as $$
-  with balances as (
-    select
-      fam.id as family_id,
-      coalesce(sum(
-        case
-          when le.to_family_id = fam.id then le.hours
-          when le.from_family_id = fam.id then -le.hours
-          else 0
-        end
-      ), 0) as hours_balance
-    from public.families fam
-    left join public.ledger_entries le
-      on le.to_family_id = fam.id or le.from_family_id = fam.id
-    group by fam.id
-  ),
-  monthly_usage as (
-    select
-      le.from_family_id as family_id,
-      true as has_used_this_month
-    from public.ledger_entries le
-    join public.requests r on r.id = le.request_id
-    where r.type = 'babysit'
-      and le.entry_date >= public.rpc_local_month_start()
-      and le.entry_date < public.rpc_local_month_end()
-    group by le.from_family_id
-  )
   select
     o.id,
     o.request_id,
     o.family_id,
     f.name as family_name,
-    coalesce(b.hours_balance, 0) as hours_balance,
-    coalesce(mu.has_used_this_month, false) as has_used_this_month,
+    public.rpc_hours_balance_as_of(o.family_id, public.rpc_local_today()) as hours_balance,
+    public.rpc_active_this_month(o.family_id) as active_this_month,
     o.notes,
     o.created_at
   from public.offers o
   join public.families f on f.id = o.family_id
-  left join balances b on b.family_id = o.family_id
-  left join monthly_usage mu on mu.family_id = o.family_id
   where o.request_id = p_request_id
   order by
-    coalesce(mu.has_used_this_month, false) asc,
-    coalesce(b.hours_balance, 0) asc,
+    active_this_month asc,
+    hours_balance asc,
     o.created_at asc,
     o.id asc;
 $$;
@@ -614,7 +1037,7 @@ declare
   v_hours numeric;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -745,7 +1168,7 @@ declare
   v_hours numeric;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -831,6 +1254,31 @@ begin
 end;
 $$;
 
+-- RPC: cancel request while still active
+create or replace function public.rpc_cancel_request(p_request_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid;
+begin
+  v_family_id := public.rpc_my_family_id();
+
+  update public.requests
+  set status = 'cancelled',
+      assignee_family_id = null
+  where id = p_request_id
+    and requester_family_id = v_family_id
+    and status in ('open', 'offered', 'assigned');
+
+  if not found then
+    raise exception 'Request not found or cannot be cancelled';
+  end if;
+end;
+$$;
+
 -- RPC: submit an offer on a request
 create or replace function public.rpc_offer_request(
   p_request_id uuid,
@@ -845,7 +1293,7 @@ declare
   v_request public.requests%rowtype;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -894,7 +1342,7 @@ declare
   v_request_status text;
   v_assignee_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   select o.request_id, o.family_id
   into v_offer_request_id, v_offer_family_id
@@ -949,7 +1397,7 @@ declare
   v_request_status text;
   v_assignee_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
@@ -1015,54 +1463,8 @@ begin
 end;
 $$;
 
--- RPC: requester clears accepted assignee and reopens offer state
-create or replace function public.rpc_request_clear_assignee(
-  p_request_id uuid
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_family_id uuid;
-  v_requester_family_id uuid;
-  v_status text;
-begin
-  v_family_id := public.rpc_get_family_id();
-
-  perform public.rpc_refresh_request_statuses();
-
-  select requester_family_id, status
-  into v_requester_family_id, v_status
-  from public.requests
-  where id = p_request_id;
-
-  if not found then
-    raise exception 'Request not found';
-  end if;
-
-  if v_requester_family_id <> v_family_id then
-    raise exception 'Only requester can clear accepted offer';
-  end if;
-
-  if v_status <> 'assigned' then
-    raise exception 'Only assigned requests can clear accepted offer';
-  end if;
-
-  update public.requests
-  set status = case
-        when exists (select 1 from public.offers o where o.request_id = p_request_id) then 'offered'
-        else 'open'
-      end,
-      assignee_family_id = null
-  where id = p_request_id
-    and status = 'assigned';
-end;
-$$;
-
 -- RPC: requester selects the winning offer and assigns request
-create or replace function public.rpc_request_set_assignee(
+create or replace function public.rpc_assign_request(
   p_request_id uuid,
   p_offer_id uuid
 )
@@ -1077,11 +1479,12 @@ declare
   v_status text;
   v_family_id uuid;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
 
   perform public.rpc_refresh_request_statuses();
 
-  select requester_family_id, status into v_requester_family_id, v_status
+  select requester_family_id, status
+  into v_requester_family_id, v_status
   from public.requests
   where id = p_request_id;
 
@@ -1113,8 +1516,10 @@ begin
 end;
 $$;
 
--- RPC: cancel request while still active
-create or replace function public.rpc_cancel_request(p_request_id uuid)
+-- RPC: requester clears accepted assignee and reopens offer state
+create or replace function public.rpc_unassign_request(
+  p_request_id uuid
+)
 returns void
 language plpgsql
 security definer
@@ -1122,323 +1527,73 @@ set search_path = public
 as $$
 declare
   v_family_id uuid;
+  v_requester_family_id uuid;
+  v_status text;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
+
+  perform public.rpc_refresh_request_statuses();
+
+  select requester_family_id, status
+  into v_requester_family_id, v_status
+  from public.requests
+  where id = p_request_id;
+
+  if not found then
+    raise exception 'Request not found';
+  end if;
+
+  if v_requester_family_id <> v_family_id then
+    raise exception 'Only requester can clear accepted offer';
+  end if;
+
+  if v_status <> 'assigned' then
+    raise exception 'Only assigned requests can clear accepted offer';
+  end if;
 
   update public.requests
-  set status = 'cancelled',
+  set status = case
+        when exists (select 1 from public.offers o where o.request_id = p_request_id) then 'offered'
+        else 'open'
+      end,
       assignee_family_id = null
   where id = p_request_id
-    and requester_family_id = v_family_id
-    and status in ('open', 'offered', 'assigned');
-
-  if not found then
-    raise exception 'Request not found or cannot be cancelled';
-  end if;
+    and status = 'assigned';
 end;
 $$;
 
--- RPC: current user's net ledger balance
-create or replace function public.rpc_get_hours_balance()
-returns numeric
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select coalesce(sum(
-    case
-      when le.to_family_id = me.family_id then le.hours
-      when le.from_family_id = me.family_id then -le.hours
-      else 0
-    end
-  ), 0)
-  from public.ledger_entries le
-  cross join me;
-$$;
-
--- RPC: whether current user completed a request this calendar month
-create or replace function public.rpc_has_completed_request_this_month()
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select exists (
-    select 1
-    from public.ledger_entries le
-    join public.requests r on r.id = le.request_id
-    cross join me
-    where le.from_family_id = me.family_id
-      and le.entry_date >= public.rpc_local_month_start()
-      and le.entry_date < public.rpc_local_month_end()
-  );
-$$;
-
--- RPC: dashboard all available requests
-create or replace function public.rpc_list_requests_dashboard_other()
+-- RPC: family ledger balance table
+create or replace function public.rpc_list_ledger_balances()
 returns table (
-  id uuid,
-  requester_family_id uuid,
-  family_name text,
-  status text,
-  type text,
-  notes text,
-  date date,
-  start_time time,
-  end_time time,
-  flexible_date boolean,
-  flexible_start_time boolean,
-  flexible_end_time boolean,
-  hours numeric
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  perform public.rpc_refresh_request_statuses();
-
-  return query
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select
-    r.id,
-    r.requester_family_id,
-    f.name as family_name,
-    r.status,
-    r.type,
-    r.notes,
-    r.date,
-    r.start_time,
-    r.end_time,
-    r.flexible_date,
-    r.flexible_start_time,
-    r.flexible_end_time,
-    r.hours
-  from public.requests r
-  join public.families f on f.id = r.requester_family_id
-  cross join me
-  where r.status in ('open', 'offered')
-    and r.requester_family_id <> me.family_id
-    and not exists (
-      select 1
-      from public.offers o
-      where o.request_id = r.id
-        and o.family_id = me.family_id
-    )
-  order by r.date asc nulls first
-     ,r.start_time asc nulls first
-     ,r.id;
-end;
-$$;
-
--- RPC: dashboard active requests created by current user
-create or replace function public.rpc_list_requests_dashboard_mine()
-returns table (
-  id uuid,
-  family_name text,
-  status text,
-  type text,
-  notes text,
-  date date,
-  start_time time,
-  end_time time,
-  flexible_date boolean,
-  flexible_start_time boolean,
-  flexible_end_time boolean,
-  hours numeric
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  perform public.rpc_refresh_request_statuses();
-
-  return query
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select
-    r.id,
-    f.name as family_name,
-    r.status,
-    r.type,
-    r.notes,
-    r.date,
-    r.start_time,
-    r.end_time,
-    r.flexible_date,
-    r.flexible_start_time,
-    r.flexible_end_time,
-    r.hours
-  from public.requests r
-  join public.families f on f.id = r.requester_family_id
-  cross join me
-  where r.requester_family_id = me.family_id
-    and r.status in ('open', 'offered', 'assigned')
-  order by r.date asc nulls first
-     ,r.start_time asc nulls first
-     ,r.id;
-end;
-$$;
-
--- RPC: dashboard requests from other families that current family has submitted offers on
-create or replace function public.rpc_list_offers_dashboard_mine()
-returns table (
-  id uuid,
-  requester_family_id uuid,
-  family_name text,
-  status text,
-  type text,
-  notes text,
-  date date,
-  start_time time,
-  end_time time,
-  flexible_date boolean,
-  flexible_start_time boolean,
-  flexible_end_time boolean,
-  hours numeric,
-  offer_created_at timestamptz
-)
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  perform public.rpc_refresh_request_statuses();
-
-  return query
-  with me as (
-    select public.rpc_get_family_id() as family_id
-  )
-  select
-    r.id,
-    r.requester_family_id,
-    f.name as family_name,
-    r.status,
-    r.type,
-    r.notes,
-    r.date,
-    r.start_time,
-    r.end_time,
-    r.flexible_date,
-    r.flexible_start_time,
-    r.flexible_end_time,
-    r.hours,
-    o.created_at as offer_created_at
-  from public.offers o
-  join public.requests r on r.id = o.request_id
-  join public.families f on f.id = r.requester_family_id
-  cross join me
-  where o.family_id = me.family_id
-    and (r.status = 'offered' or (r.status = 'assigned' and r.assignee_family_id = me.family_id))
-  order by r.date asc nulls first
-    ,r.start_time asc nulls first
-    ,o.created_at desc
-    ,r.id;
-end;
-$$;
-
--- RPC: fetch current user's family details for profile page
-create or replace function public.rpc_get_my_family_details()
-returns table (
-  id uuid,
   name text,
-  address text,
-  emergency_contacts jsonb,
-  pets text,
-  family_photo_url text,
-  notes text,
-  admin_date_joined date,
-  admin_last_background_check date,
-  admin_last_dues_payment date,
-  is_admin boolean
+  active_this_month boolean,
+  hours_balance numeric,
+  month_start_balance numeric,
+  prior_month_start_balance numeric
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  with me as (
-    select public.rpc_get_family_id() as family_id
+  with d as (
+    select
+      public.rpc_local_today()::date as today,
+      (public.rpc_local_month_start() - interval '1 day')::date as prior_month_end,
+      (public.rpc_local_month_start() - interval '1 month 1 day')::date as two_prior_month_end
   )
   select
-    p.id,
-    p.name,
-    p.address,
-    p.emergency_contacts,
-    p.pets,
-    p.family_photo_url,
-    p.notes,
-    p.admin_date_joined,
-    p.admin_last_background_check,
-    p.admin_last_dues_payment,
-    p.is_admin
-  from public.families p
-  cross join me
-  where p.id = me.family_id;
-$$;
-
--- RPC: upsert current user's family details
-create or replace function public.rpc_upsert_my_family_details(
-  p_name text default null,
-  p_address text default null,
-  p_emergency_contacts jsonb default null,
-  p_pets text default null,
-  p_family_photo_url text default null,
-  p_notes text default null
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_family_id uuid;
-  v_emergency_contacts jsonb;
-begin
-  v_family_id := public.rpc_get_family_id();
-  v_emergency_contacts := p_emergency_contacts;
-
-  if v_emergency_contacts is not null then
-    if jsonb_typeof(v_emergency_contacts) <> 'array' then
-      raise exception 'Emergency contacts must be a JSON array';
-    end if;
-
-    if exists (
-      select 1
-      from jsonb_array_elements(v_emergency_contacts) as contact
-      where jsonb_typeof(contact) <> 'object'
-         or nullif(btrim(contact->>'name'), '') is null
-         or nullif(btrim(contact->>'phone'), '') is null
-    ) then
-      raise exception 'Each emergency contact must include non-empty name and phone';
-    end if;
-  end if;
-
-  update public.families
-  set name = p_name,
-      address = p_address,
-      emergency_contacts = v_emergency_contacts,
-      pets = p_pets,
-      family_photo_url = p_family_photo_url,
-      notes = p_notes
-  where id = v_family_id;
-
-  if not found then
-    raise exception 'Family not found';
-  end if;
-end;
+    f.name,
+    public.rpc_active_this_month(f.id) as active_this_month,
+    public.rpc_hours_balance_as_of(f.id, d.today) as hours_balance,
+    public.rpc_hours_balance_as_of(f.id, d.prior_month_end) as month_start_balance,
+    public.rpc_hours_balance_as_of(f.id, d.two_prior_month_end) as prior_month_start_balance
+  from public.families f
+  cross join d
+  where f.is_active = true
+  order by
+    f.name,
+    f.id;
 $$;
 
 -- RPC: ledger entries filtered by optional date range
@@ -1449,12 +1604,12 @@ create or replace function public.rpc_list_ledger_entries_filtered(
 )
 returns table (
   id uuid,
+  entry_date date,
+  hours numeric,
   from_family_id uuid,
   to_family_id uuid,
   from_family_name text,
   to_family_name text,
-  entry_date date,
-  hours numeric,
   notes text,
   request_id uuid,
   email text
@@ -1466,12 +1621,12 @@ set search_path = public
 as $$
   select
     le.id,
+    le.entry_date,
+    le.hours,
     le.from_family_id,
     le.to_family_id,
     ff.name as from_family_name,
     tf.name as to_family_name,
-    le.entry_date,
-    le.hours,
     le.notes,
     le.request_id,
     u.email
@@ -1481,56 +1636,21 @@ as $$
   left join public.families tf on tf.id = le.to_family_id
   where (p_start_date is null or le.entry_date >= p_start_date)
     and (p_end_date is null or le.entry_date <= p_end_date)
-    and (p_family_id is null or (le.from_family_id = p_family_id or le.to_family_id = p_family_id))
+    and (p_family_id is null or p_family_id in (le.from_family_id, le.to_family_id))
   order by le.entry_date desc;
 $$;
 
--- RPC: family ledger balance table
-create or replace function public.rpc_list_ledger_balances()
-returns table (
-  family_id uuid,
-  name text,
-  hours_balance numeric
-)
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  with users as (
-    select p.id as family_id, p.name
-    from public.families p
-  ),
-  balances as (
-    select
-      u.family_id,
-      u.name,
-      coalesce(sum(
-        case
-          when le.to_family_id = u.family_id then le.hours
-          when le.from_family_id = u.family_id then -le.hours
-          else 0
-        end
-      ), 0) as hours_balance
-    from users u
-    left join public.ledger_entries le
-      on le.to_family_id = u.family_id or le.from_family_id = u.family_id
-    group by u.family_id, u.name
-  )
-  select b.family_id, b.name, b.hours_balance
-  from balances b
-  order by b.name nulls last, b.family_id;
-$$;
-
 -- RPC: list completed sits for entry creation
-create or replace function public.rpc_list_requests_completed_for_entry()
+create or replace function public.rpc_list_requests_for_entry()
 returns table (
   request_id uuid,
   from_family_id uuid,
   to_family_id uuid,
+  from_family_name text,
+  to_family_name text,
   request_date date,
-  sit_location text,
-  meal_required boolean,
+  drive_time boolean,
+  meal_served boolean,
   hours numeric,
   notes text
 )
@@ -1539,13 +1659,18 @@ stable
 security definer
 set search_path = public
 as $$
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
   select
     r.id as request_id,
     r.requester_family_id as from_family_id,
     r.assignee_family_id as to_family_id,
+    ff.name as from_family_name,
+    tf.name as to_family_name,
     r.date as request_date,
-    r.sit_location,
-    r.meal_required,
+    case when r.sit_location = 'requester_house' then true else false end as drive_time,
+    r.meal_required as meal_served,
     coalesce(
       r.hours,
       case
@@ -1556,109 +1681,17 @@ as $$
     ) as hours,
     r.notes
   from public.requests r
+  join public.families ff on r.requester_family_id = ff.id
+  join public.families tf on r.assignee_family_id = tf.id
   where r.status = 'completed'
-    and r.assignee_family_id is not null
+    and r.assignee_family_id = me.family_id
     and not exists (
       select 1
-      from public.ledger_entries le2
-      where le2.request_id = r.id
+      from public.ledger_entries le
+      where le.request_id = r.id
     )
   order by r.date desc nulls last,
     r.id;
-$$;
-
--- RPC: list families for from/to selectors
-create or replace function public.rpc_list_families_for_entry()
-returns table (
-  id uuid,
-  name text
-)
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select p.id, coalesce(p.name, p.id::text) as name
-  from public.families p
-  order by p.name nulls last, p.id;
-$$;
-
--- RPC: list full family card details for families page
-create or replace function public.rpc_list_families_full()
-returns table (
-  family_id uuid,
-  family_name text,
-  joined_date date,
-  is_admin boolean,
-  address text,
-  parents jsonb,
-  emergency_contacts jsonb,
-  children jsonb,
-  pets text,
-  family_photo_url text,
-  notes text
-)
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  with parent_rows as (
-    select
-      fp.family_id,
-      fp.name,
-      fp.phone,
-      u.email
-    from public.family_parents fp
-    left join auth.users u on u.id = fp.user_id
-  ),
-  parent_json as (
-    select
-      pr.family_id,
-      jsonb_agg(
-        jsonb_build_object(
-          'name', pr.name,
-          'email', pr.email,
-          'phone', pr.phone
-        )
-        order by lower(coalesce(pr.name, '')), lower(coalesce(pr.email, ''))
-      ) as parents
-    from parent_rows pr
-    group by pr.family_id
-  ),
-  child_json as (
-    select
-      fc.family_id,
-      jsonb_agg(
-        jsonb_build_object(
-          'id', fc.id,
-          'name', fc.name,
-          'date_of_birth', fc.date_of_birth,
-          'allergies', fc.allergies,
-          'notes', fc.notes
-        )
-        order by lower(coalesce(fc.name, '')), fc.id
-      ) as children
-    from public.family_children fc
-    group by fc.family_id
-  )
-  select
-    f.id as family_id,
-    f.name as family_name,
-    f.admin_date_joined as joined_date,
-    f.is_admin,
-    f.address,
-    coalesce(pj.parents, '[]'::jsonb) as parents,
-    coalesce(f.emergency_contacts, '[]'::jsonb) as emergency_contacts,
-    coalesce(cj.children, '[]'::jsonb) as children,
-    f.pets,
-    f.family_photo_url,
-    f.notes
-  from public.families f
-  left join parent_json pj on pj.family_id = f.id
-  left join child_json cj on cj.family_id = f.id
-  where f.is_active = true
-  order by lower(coalesce(f.name, '')), f.id;
 $$;
 
 -- RPC: create ledger entry
@@ -1667,6 +1700,7 @@ create or replace function public.rpc_create_ledger_entry(
   p_to_family_id uuid,
   p_hours numeric,
   p_entry_date date default null,
+  p_notes text default null,
   p_request_id uuid default null
 )
 returns uuid
@@ -1679,7 +1713,7 @@ declare
   v_family_id uuid;
   v_entry_date date;
 begin
-  v_family_id := public.rpc_get_family_id();
+  v_family_id := public.rpc_my_family_id();
   v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
 
   if p_to_family_id <> v_family_id then
@@ -1697,15 +1731,15 @@ begin
   insert into public.ledger_entries (
     from_family_id,
     to_family_id,
-    hours,
     entry_date,
+    hours,
     request_id
   )
   values (
     p_from_family_id,
     p_to_family_id,
-    p_hours,
     v_entry_date,
+    p_hours,
     p_request_id
   )
   returning id into v_id;
@@ -1732,7 +1766,7 @@ declare
   v_is_admin boolean;
   v_entry_date date;
 begin
-  v_is_admin := public.rpc_get_admin_status();
+  v_is_admin := public.rpc_my_is_admin();
   if not v_is_admin then
     raise exception 'Admin only';
   end if;
@@ -1752,15 +1786,15 @@ begin
   insert into public.ledger_entries (
     from_family_id,
     to_family_id,
-    hours,
     entry_date,
+    hours,
     notes
   )
   values (
     p_from_family_id,
     p_to_family_id,
-    p_hours,
     v_entry_date,
+    p_hours,
     p_notes
   )
   returning id into v_id;
@@ -1825,10 +1859,12 @@ as $$
     ) as member_count,
     public.rpc_admin_family_is_deletable(f.id) as can_delete
   from public.families f
-  where public.rpc_get_admin_status()
-  order by is_admin desc,
+  where public.rpc_my_is_admin()
+  order by
+    is_admin desc,
     is_active desc,
-    lower(coalesce(f.name, '')), f.id;
+    f.name,
+    f.id;
 $$;
 
 -- RPC: create a family by name for admin management
@@ -1841,7 +1877,7 @@ as $$
 declare
   v_id uuid;
 begin
-  if not public.rpc_get_admin_status() then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
@@ -1872,7 +1908,7 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.rpc_get_admin_status() then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
@@ -1898,7 +1934,7 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.rpc_get_admin_status() then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
@@ -1940,12 +1976,12 @@ as $$
     f.is_active as family_is_active,
     u.created_at,
     u.last_sign_in_at,
-    coalesce(public.rpc_admin_family_is_deletable(fp.family_id), true) as can_delete
+    public.rpc_admin_family_is_deletable(fp.family_id) as can_delete
   from auth.users u
   left join public.family_parents fp on fp.user_id = u.id
   left join public.families f on f.id = fp.family_id
-  where public.rpc_get_admin_status()
-  order by lower(coalesce(u.email, '')), u.id;
+  where public.rpc_my_is_admin()
+  order by u.email, u.id;
 $$;
 
 -- RPC: move a user to a different family
@@ -1959,7 +1995,7 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.rpc_get_admin_status() then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
@@ -1988,7 +2024,12 @@ $$;
 
 -- RPC: get dashboard banner
 create or replace function public.rpc_get_dashboard_banner()
-returns table (enabled boolean, text text, bg_color text, text_color text)
+returns table (
+  enabled boolean,
+  text text,
+  bg_color text,
+  text_color text
+)
 language sql
 stable
 security definer
@@ -2017,7 +2058,7 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.rpc_get_admin_status() then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
@@ -2031,7 +2072,8 @@ begin
       'text_color', coalesce(p_text_color, '#FFFFFF')
     )
   )
-  on conflict (key) do update set value = excluded.value;
+  on conflict (key) do update
+  set value = excluded.value;
 end;
 $$;
 
@@ -2065,7 +2107,7 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.rpc_get_admin_status() then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
@@ -2079,7 +2121,8 @@ begin
 
   insert into public.site_settings (key, value)
   values ('dashboard_links', p_links)
-  on conflict (key) do update set value = excluded.value;
+  on conflict (key) do update
+  set value = excluded.value;
 end;
 $$;
 
@@ -2096,39 +2139,53 @@ grant all on all sequences in schema public to service_role;
 grant all on all functions in schema public to service_role;
 
 -- RPC grants: only expose the frontend-used API surface
+
+-- Helpers
+grant execute on function public.rpc_my_family_id() to authenticated, service_role;
+grant execute on function public.rpc_my_is_active() to authenticated, service_role;
+grant execute on function public.rpc_my_is_admin() to authenticated, service_role;
+
+-- Dashboard
+grant execute on function public.rpc_my_active_this_month() to authenticated, service_role;
+grant execute on function public.rpc_my_hours_balance() to authenticated, service_role;
+grant execute on function public.rpc_list_other_requests() to authenticated, service_role;
+grant execute on function public.rpc_list_my_requests() to authenticated, service_role;
+grant execute on function public.rpc_list_my_offers() to authenticated, service_role;
+
+-- Profile
+grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
+grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
+grant execute on function public.rpc_update_my_family_details(text, text, jsonb, text, text, text) to authenticated, service_role;
+grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
+grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
+grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
+grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
+
+-- Families
+grant execute on function public.rpc_list_families_for_filters() to authenticated, service_role;
+grant execute on function public.rpc_list_families_active() to authenticated, service_role;
+
+-- Requests
 grant execute on function public.rpc_list_requests_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
-grant execute on function public.rpc_get_family_id() to authenticated, service_role;
-grant execute on function public.rpc_is_current_family_active() to authenticated, service_role;
-grant execute on function public.rpc_list_my_family_emails() to authenticated, service_role;
-grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
-grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
-grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
-grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_update_request(uuid, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
+grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
-grant execute on function public.rpc_request_set_assignee(uuid, uuid) to authenticated, service_role;
-grant execute on function public.rpc_request_clear_assignee(uuid) to authenticated, service_role;
-grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
-grant execute on function public.rpc_get_hours_balance() to authenticated, service_role;
-grant execute on function public.rpc_list_requests_dashboard_other() to authenticated, service_role;
-grant execute on function public.rpc_list_requests_dashboard_mine() to authenticated, service_role;
-grant execute on function public.rpc_list_offers_dashboard_mine() to authenticated, service_role;
-grant execute on function public.rpc_has_completed_request_this_month() to authenticated, service_role;
-grant execute on function public.rpc_get_admin_status() to authenticated, service_role;
-grant execute on function public.rpc_get_my_family_details() to authenticated, service_role;
-grant execute on function public.rpc_upsert_my_family_details(text, text, jsonb, text, text, text) to authenticated, service_role;
-grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
+grant execute on function public.rpc_assign_request(uuid, uuid) to authenticated, service_role;
+grant execute on function public.rpc_unassign_request(uuid) to authenticated, service_role;
+
+-- Ledger
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
-grant execute on function public.rpc_list_requests_completed_for_entry() to authenticated, service_role;
-grant execute on function public.rpc_list_families_for_entry() to authenticated, service_role;
-grant execute on function public.rpc_list_families_full() to authenticated, service_role;
-grant execute on function public.rpc_create_ledger_entry(uuid, uuid, numeric, date, uuid) to authenticated, service_role;
+grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
+grant execute on function public.rpc_list_requests_for_entry() to authenticated, service_role;
+grant execute on function public.rpc_create_ledger_entry(uuid, uuid, numeric, date, text, uuid) to authenticated, service_role;
+
+-- Admin
 grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
 grant execute on function public.rpc_admin_list_families() to authenticated, service_role;
 grant execute on function public.rpc_admin_create_family(text) to authenticated, service_role;
