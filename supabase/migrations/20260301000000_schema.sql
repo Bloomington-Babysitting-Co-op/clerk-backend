@@ -226,15 +226,17 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  v_today date := public.rpc_local_today();
 begin
   update public.requests
   set status = 'expired'
-  where date < public.rpc_local_today()
+  where date < v_today
     and status in ('open', 'offered');
 
   update public.requests
   set status = 'completed'
-  where date < public.rpc_local_today()
+  where date < v_today
     and status = 'assigned';
 end;
 $$;
@@ -249,7 +251,6 @@ as $$
 declare
   v_user_id uuid := auth.uid();
   v_family_id uuid;
-  v_email text;
 begin
   if v_user_id is null then
     raise exception 'Not authenticated';
@@ -258,6 +259,10 @@ begin
   select fm.family_id into v_family_id
   from public.family_parents fm
   where fm.user_id = v_user_id;
+  
+  if v_family_id is null then
+    raise exception 'No Family linked';
+  end if;
 
   if exists (
     select 1
@@ -564,20 +569,16 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
-  v_emergency_contacts jsonb;
+  v_family_id uuid := public.rpc_my_family_id();
 begin
-  v_family_id := public.rpc_my_family_id();
-  v_emergency_contacts := p_emergency_contacts;
-
-  if v_emergency_contacts is not null then
-    if jsonb_typeof(v_emergency_contacts) <> 'array' then
+  if p_emergency_contacts is not null then
+    if jsonb_typeof(p_emergency_contacts) <> 'array' then
       raise exception 'Emergency contacts must be a JSON array';
     end if;
 
     if exists (
       select 1
-      from jsonb_array_elements(v_emergency_contacts) as contact
+      from jsonb_array_elements(p_emergency_contacts) as contact
       where jsonb_typeof(contact) <> 'object'
          or nullif(btrim(contact->>'name'), '') is null
          or nullif(btrim(contact->>'phone'), '') is null
@@ -589,7 +590,7 @@ begin
   update public.families
   set name = p_name,
       address = p_address,
-      emergency_contacts = v_emergency_contacts,
+      emergency_contacts = p_emergency_contacts,
       pets = p_pets,
       family_photo_url = p_family_photo_url,
       notes = p_notes
@@ -640,10 +641,8 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
 begin
-  v_family_id := public.rpc_my_family_id();
-
   delete from public.family_children
   where family_id = v_family_id;
 
@@ -724,10 +723,8 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
 begin
-  v_family_id := public.rpc_my_family_id();
-
   update public.family_parents
   set
     family_id = v_family_id,
@@ -1034,11 +1031,9 @@ set search_path = public
 as $$
 declare
   v_id uuid;
-  v_hours numeric;
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
+  v_hours numeric := p_hours;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   perform public.rpc_refresh_request_statuses();
 
   if p_type not in ('babysit', 'drive', 'favor') then
@@ -1064,8 +1059,6 @@ begin
   if p_meal_prepared_by_sitter and not p_meal_required then
     raise exception 'Meal cannot be prepared by sitter unless meal is required';
   end if;
-
-  v_hours := p_hours;
 
   if p_type = 'babysit' and p_start_time is not null and p_end_time is not null then
     v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
@@ -1164,12 +1157,10 @@ security definer
 set search_path = public
 as $$
 declare
+  v_family_id uuid := public.rpc_my_family_id();
+  v_hours numeric := p_hours;
   v_request_type text;
-  v_hours numeric;
-  v_family_id uuid;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   perform public.rpc_refresh_request_statuses();
 
   if p_notes is null or btrim(p_notes) = '' then
@@ -1201,8 +1192,6 @@ begin
   if p_meal_prepared_by_sitter and not p_meal_required then
     raise exception 'Meal cannot be prepared by sitter unless meal is required';
   end if;
-
-  v_hours := p_hours;
 
   if v_request_type = 'babysit' and p_start_time is not null and p_end_time is not null then
     v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
@@ -1262,10 +1251,8 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
 begin
-  v_family_id := public.rpc_my_family_id();
-
   update public.requests
   set status = 'cancelled',
       assignee_family_id = null
@@ -1290,11 +1277,9 @@ security definer
 set search_path = public
 as $$
 declare
+  v_family_id uuid := public.rpc_my_family_id();
   v_request public.requests%rowtype;
-  v_family_id uuid;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   perform public.rpc_refresh_request_statuses();
 
   select * into v_request
@@ -1335,15 +1320,13 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
   v_offer_request_id uuid;
   v_offer_family_id uuid;
   v_requester_family_id uuid;
   v_request_status text;
   v_assignee_family_id uuid;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   select o.request_id, o.family_id
   into v_offer_request_id, v_offer_family_id
   from public.offers o
@@ -1390,15 +1373,13 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
   v_offer_request_id uuid;
   v_offer_family_id uuid;
   v_requester_family_id uuid;
   v_request_status text;
   v_assignee_family_id uuid;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   perform public.rpc_refresh_request_statuses();
 
   select o.request_id, o.family_id
@@ -1474,13 +1455,11 @@ security definer
 set search_path = public
 as $$
 declare
+  v_family_id uuid := public.rpc_my_family_id();
   v_requester_family_id uuid;
-  v_offer_family_id uuid;
   v_status text;
-  v_family_id uuid;
+  v_offer_family_id uuid;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   perform public.rpc_refresh_request_statuses();
 
   select requester_family_id, status
@@ -1526,12 +1505,10 @@ security definer
 set search_path = public
 as $$
 declare
-  v_family_id uuid;
+  v_family_id uuid := public.rpc_my_family_id();
   v_requester_family_id uuid;
   v_status text;
 begin
-  v_family_id := public.rpc_my_family_id();
-
   perform public.rpc_refresh_request_statuses();
 
   select requester_family_id, status
@@ -1706,18 +1683,20 @@ set search_path = public
 as $$
 declare
   v_id uuid;
-  v_family_id uuid;
-  v_entry_date date;
+  v_family_id uuid := public.rpc_my_family_id();
+  v_today date := public.rpc_local_today();
+  v_entry_date date := coalesce(p_entry_date, v_today);
 begin
-  v_family_id := public.rpc_my_family_id();
-  v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
-
-  if p_to_family_id <> v_family_id then
+  if p_to_family_id IS DISTINCT FROM v_family_id then
     raise exception 'Entries must use your family as recipient';
   end if;
 
-  if p_from_family_id = p_to_family_id then
+  if p_from_family_id IS NOT DISTINCT FROM p_to_family_id then
     raise exception 'From family and to family must be different';
+  end if;
+
+  if v_entry_date > v_today then
+    raise exception 'Entry Date cannot be in the future';
   end if;
 
   if p_hours is null or p_hours <= 0 then
@@ -1759,25 +1738,28 @@ set search_path = public
 as $$
 declare
   v_id uuid;
-  v_is_admin boolean;
-  v_entry_date date;
+  v_today date := public.rpc_local_today();
+  v_entry_date date := coalesce(p_entry_date, v_today);
 begin
-  v_is_admin := public.rpc_my_is_admin();
-  if not v_is_admin then
+  if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
   end if;
 
   if (p_from_family_id is null and p_to_family_id is null) then
     raise exception 'At least one of from_family_id or to_family_id must be provided';
   end if;
+
   if (p_from_family_id is not null and p_to_family_id is not null and p_from_family_id = p_to_family_id) then
     raise exception 'From family and to family must be different';
   end if;
+
+  if v_entry_date > v_today then
+    raise exception 'Entry Date cannot be in the future';
+  end if;
+
   if p_hours is null or p_hours <= 0 or mod(p_hours * 100, 25) <> 0 then
     raise exception 'Hours must be greater than zero and divisible by 0.25';
   end if;
-
-  v_entry_date := coalesce(p_entry_date, public.rpc_local_today());
 
   insert into public.ledger_entries (
     from_family_id,
