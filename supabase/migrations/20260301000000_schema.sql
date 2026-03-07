@@ -173,6 +173,36 @@ declare
   v_user_id uuid;
   v_family_id uuid;
 begin
+  -- Storage bucket policies for family photos
+  drop policy if exists allow_authenticated_uploads_family_photos on storage.objects;
+  create policy allow_authenticated_uploads_family_photos
+    on storage.objects
+    for insert
+    to authenticated
+    with check (bucket_id = 'family-photos');
+
+  drop policy if exists allow_authenticated_updates_family_photos on storage.objects;
+  create policy allow_authenticated_updates_family_photos
+    on storage.objects
+    for update
+    to authenticated
+    using (bucket_id = 'family-photos')
+    with check (bucket_id = 'family-photos');
+
+  drop policy if exists allow_authenticated_deletes_family_photos on storage.objects;
+  create policy allow_authenticated_deletes_family_photos
+    on storage.objects
+    for delete
+    to authenticated
+    using (bucket_id = 'family-photos');
+
+  drop policy if exists allow_authenticated_selects_family_photos on storage.objects;
+  create policy allow_authenticated_selects_family_photos
+    on storage.objects
+    for select
+    to authenticated
+    using (bucket_id = 'family-photos');
+
   select id into v_user_id
   from auth.users
   where email = p_email
@@ -1720,6 +1750,7 @@ as $$
   from public.requests r
   join public.families ff on r.requester_family_id = ff.id
   join public.families tf on r.assignee_family_id = tf.id
+  cross join me
   where r.status = 'completed'
     and r.assignee_family_id = me.family_id
     and not exists (
