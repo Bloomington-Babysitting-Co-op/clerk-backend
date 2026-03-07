@@ -32,7 +32,8 @@ create table public.families (
   admin_last_background_check date,
   admin_last_dues_payment date,
   is_active boolean not null default true,
-  is_admin boolean not null default false
+  is_admin boolean not null default false,
+  unique (name)
 );
 
 create index families_is_admin_idx on public.families(is_admin);
@@ -160,6 +161,43 @@ create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
 create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_entry_date_idx on public.ledger_entries(entry_date);
 create index ledger_request_id_idx on public.ledger_entries(request_id);
+
+-- Function: Bootstrap an initial admin family
+create or replace function public.rpc_bootstrap_admin(p_email text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id uuid;
+  v_family_id uuid;
+begin
+  select id into v_user_id
+  from auth.users
+  where email = p_email
+  limit 1;
+
+  if v_user_id is null then
+    raise exception 'User % does not exist. Create the user in the Supabase Administration dashboard first.', p_email;
+  end if;
+
+  insert into public.families (name, is_active, is_admin)
+  values ('Admin Family', true, true)
+  on conflict (name) do update set is_active = true, is_admin = true
+  returning id into v_family_id;
+
+  perform 1
+  from public.family_parents
+  where user_id = v_user_id
+    and family_id = v_family_id;
+
+  if not found then
+    insert into public.family_parents (user_id, family_id)
+    values (v_user_id, v_family_id);
+  end if;
+end;
+$$;
 
 -- Function: canonical local date for request lifecycle/validation checks
 create or replace function public.rpc_local_today()
