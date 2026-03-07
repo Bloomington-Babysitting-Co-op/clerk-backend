@@ -27,7 +27,7 @@ create table public.families (
   emergency_contacts jsonb,
   pets text,
   notes text,
-  family_photo_url text,
+  family_photo_storage_path text,
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
@@ -561,7 +561,7 @@ returns table (
   emergency_contacts jsonb,
   pets text,
   notes text,
-  family_photo_url text,
+  family_photo_storage_path text,
   admin_date_joined date,
   admin_last_background_check date,
   admin_last_dues_payment date,
@@ -582,7 +582,7 @@ as $$
     p.emergency_contacts,
     p.pets,
     p.notes,
-    p.family_photo_url,
+    p.family_photo_storage_path,
     p.admin_date_joined,
     p.admin_last_background_check,
     p.admin_last_dues_payment,
@@ -640,7 +640,7 @@ $$;
 
 -- RPC: update only the family's photo path/url
 create or replace function public.rpc_update_my_family_photo(
-  p_family_photo_url text default null
+  p_family_photo_storage_path text default null
 )
 returns void
 language plpgsql
@@ -651,7 +651,7 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
 begin
   update public.families
-  set family_photo_url = p_family_photo_url
+  set family_photo_storage_path = p_family_photo_storage_path
   where id = v_family_id;
 
   if not found then
@@ -834,7 +834,7 @@ returns table (
   children jsonb,
   pets text,
   notes text,
-  family_photo_url text
+  family_photo_storage_path text
 )
 language sql
 stable
@@ -883,7 +883,7 @@ as $$
     coalesce(cj.children, '[]'::jsonb) as children,
     f.pets,
     f.notes,
-    f.family_photo_url
+    f.family_photo_storage_path
   from public.families f
   left join parent_json pj on pj.family_id = f.id
   left join child_json cj on cj.family_id = f.id
