@@ -29,3 +29,4 @@ npx supabase link --project-ref <your-project-ref>
 ## Bootstrap
 1. Create an initial user in the [Supabase Authentication dashboard](https://supabase.com/dashboard/project/_/auth/users)
 2. Open the [Supabase SQL Editor dashboard](https://supabase.com/dashboard/project/_/sql) and run `SELECT public.rpc_bootstrap_admin('admin@gmail.com');` (changing the email)
+3. Open the [Supabase Storage Files dashboard](https://supabase.com/dashboard/project/_/storage/files) and create a private bucket named `family-photos`
