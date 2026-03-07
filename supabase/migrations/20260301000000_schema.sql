@@ -179,7 +179,7 @@ begin
   limit 1;
 
   if v_user_id is null then
-    raise exception 'User % does not exist. Create the user in the Supabase Administration dashboard first.', p_email;
+    raise exception 'User % does not exist. Create the user in the Supabase Authentication dashboard first.', p_email;
   end if;
 
   insert into public.families (name, is_active, is_admin)
