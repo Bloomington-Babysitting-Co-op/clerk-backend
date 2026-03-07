@@ -902,11 +902,14 @@ returns table (
   family_name text,
   status text,
   type text,
+  notes text,
   date date,
   start_time time,
   end_time time,
-  hours numeric,
-  notes text
+  flexible_date boolean,
+  flexible_start_time boolean,
+  flexible_end_time boolean,
+  hours numeric
 )
 language plpgsql
 security definer
@@ -921,11 +924,14 @@ begin
     f.name as family_name,
     r.status,
     r.type,
+    r.notes,
     r.date,
     r.start_time,
     r.end_time,
-    r.hours,
-    r.notes
+    r.flexible_date,
+    r.flexible_start_time,
+    r.flexible_end_time,
+    r.hours
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   where (p_start_date is null or r.date >= p_start_date)
