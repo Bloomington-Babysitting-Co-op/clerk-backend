@@ -62,7 +62,7 @@ create table public.family_children (
   id uuid primary key default gen_random_uuid(),
   family_id uuid not null references public.families(id) on delete cascade,
   name text not null,
-  date_of_birth date,
+  date_of_birth date not null,
   allergies text,
   notes text
 );
@@ -76,8 +76,8 @@ create table public.requests (
   requester_family_id uuid not null references public.families(id),
   status text not null,
   type text not null,
-  notes text,
-  date date,
+  notes text not null,
+  date date not null,
   start_time time,
   end_time time,
   flexible_date boolean not null default false,
@@ -92,25 +92,26 @@ create table public.requests (
   destination text,
   assignee_family_id uuid references public.families(id),
   created_at timestamptz default now(),
+  created_by uuid not null default auth.uid() references auth.users(id),
   constraint requests_status_check check (
     status = any (array['open'::text, 'offered'::text, 'assigned'::text, 'completed'::text, 'cancelled'::text, 'expired'::text])
   ),
-  constraint assignee_family_id_valid check (
-    ((status = 'assigned'::text) and (assignee_family_id is not null))
-    or ((status <> 'assigned'::text) and (assignee_family_id is null))
-    or (status = 'completed'::text)
-  ),
-  constraint requests_request_type_check check (
+  constraint requests_type_check check (
     type = any (array['babysit'::text, 'drive'::text, 'favor'::text])
-  ),
-  constraint requests_sit_location_check check (
-    sit_location is null or sit_location = any (array['sitter_house'::text, 'requester_house'::text, 'either'::text])
   ),
   constraint requests_valid_time_range_check check (
     (start_time is null or end_time is null) or (end_time > start_time)
   ),
   constraint requests_hours_check check (
     hours is null or hours > 0
+  ),
+  constraint assignee_family_id_valid check (
+    ((status = 'assigned'::text) and (assignee_family_id is not null))
+    or ((status <> 'assigned'::text) and (assignee_family_id is null))
+    or (status = 'completed'::text)
+  ),
+  constraint requests_sit_location_check check (
+    sit_location is null or sit_location = any (array['sitter_house'::text, 'requester_house'::text, 'either'::text])
   ),
   constraint requests_meal_prepared_requires_meal_check check (
     not meal_prepared_by_sitter or meal_required
@@ -137,6 +138,7 @@ create table public.offers (
   family_id uuid not null references public.families(id) on delete cascade,
   notes text,
   created_at timestamptz not null default now(),
+  created_by uuid not null default auth.uid() references auth.users(id),
   unique (request_id, family_id)
 );
 
@@ -148,18 +150,22 @@ create table public.ledger_entries (
   id uuid primary key default gen_random_uuid(),
   from_family_id uuid references public.families(id),
   to_family_id uuid references public.families(id),
-  entry_date date not null default (now() at time zone 'America/Indiana/Indianapolis')::date,
+  type text not null,
+  date date not null,
   hours numeric not null check (hours > 0),
   notes text,
   request_id uuid references public.requests(id),
-  created_by uuid not null default auth.uid() references auth.users(id),
   created_at timestamptz not null default now(),
-  constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null)
+  created_by uuid not null default auth.uid() references auth.users(id),
+  constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null),
+  constraint ledger_entries_type_check check (
+    type = any (array['request'::text, 'ad hoc'::text, 'admin'::text])
+  )
 );
 
 create index ledger_from_family_id_idx on public.ledger_entries(from_family_id);
 create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
-create index ledger_entry_date_idx on public.ledger_entries(entry_date);
+create index ledger_date_idx on public.ledger_entries(date);
 create index ledger_request_id_idx on public.ledger_entries(request_id);
 
 -- Function: Bootstrap an initial admin family
@@ -262,7 +268,7 @@ as $$
   select exists (
     select 1
     from public.ledger_entries le
-    where le.entry_date >= public.rpc_local_month_start()
+    where le.date >= public.rpc_local_month_start()
       and p_family_id in (le.from_family_id, le.to_family_id)
   );
 $$;
@@ -284,7 +290,7 @@ as $$
   ), 0) as hours_balance
   from public.ledger_entries le
   where p_family_id in (le.from_family_id, le.to_family_id)
-    and le.entry_date <= p_date;
+    and le.date <= p_date;
 $$;
 
 -- Function: refresh request statuses based on date lifecycle
@@ -835,20 +841,27 @@ begin
 end;
 $$;
 
--- RPC: list families for filter selectors
-create or replace function public.rpc_list_families_for_filters()
+-- RPC: list all families for dropdown selectors
+create or replace function public.rpc_list_families_all()
 returns table (
   id uuid,
-  name text
+  name text,
+  is_my_family boolean
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select p.id, coalesce(p.name, p.id::text) as name
-  from public.families p
-  order by p.name nulls last, p.id;
+  with me as (
+    select public.rpc_my_family_id() as family_id
+  )
+  select id,
+    name,
+    case when id = me.family_id then true else false end as is_my_family
+  from public.families
+  cross join me
+  order by name, admin_date_joined;
 $$;
 
 -- RPC: list full family card details for families page
@@ -1675,10 +1688,11 @@ create or replace function public.rpc_list_ledger_entries_filtered(
 )
 returns table (
   id uuid,
-  entry_date date,
-  hours numeric,
   from_family_name text,
   to_family_name text,
+  type text,
+  date date,
+  hours numeric,
   notes text,
   request_id uuid,
   email text
@@ -1690,10 +1704,11 @@ set search_path = public
 as $$
   select
     le.id,
-    le.entry_date,
-    le.hours,
     ff.name as from_family_name,
     tf.name as to_family_name,
+    le.type,
+    le.date,
+    le.hours,
     le.notes,
     le.request_id,
     u.email
@@ -1701,10 +1716,10 @@ as $$
   join auth.users u on u.id = le.created_by
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
-  where (p_start_date is null or le.entry_date >= p_start_date)
-    and (p_end_date is null or le.entry_date <= p_end_date)
+  where (p_start_date is null or le.date >= p_start_date)
+    and (p_end_date is null or le.date <= p_end_date)
     and (p_family_id is null or p_family_id in (le.from_family_id, le.to_family_id))
-  order by le.entry_date desc;
+  order by le.date desc;
 $$;
 
 -- RPC: list completed sits for entry creation
@@ -1766,8 +1781,9 @@ $$;
 create or replace function public.rpc_create_ledger_entry(
   p_from_family_id uuid,
   p_to_family_id uuid,
+  p_type text,
   p_hours numeric,
-  p_entry_date date default null,
+  p_date date default null,
   p_notes text default null,
   p_request_id uuid default null
 )
@@ -1780,17 +1796,21 @@ declare
   v_id uuid;
   v_family_id uuid := public.rpc_my_family_id();
   v_today date := public.rpc_local_today();
-  v_entry_date date := coalesce(p_entry_date, v_today);
+  v_date date := coalesce(p_date, v_today);
 begin
-  if p_to_family_id IS DISTINCT FROM v_family_id then
-    raise exception 'Entries must use your family as recipient';
-  end if;
-
   if p_from_family_id IS NOT DISTINCT FROM p_to_family_id then
     raise exception 'From family and to family must be different';
   end if;
 
-  if v_entry_date > v_today then
+  if p_type = 'ad hoc' and p_from_family_id IS DISTINCT FROM v_family_id then
+    raise exception 'Entries must use your family as contributor';
+  end if;
+
+  if p_type = 'request' and p_to_family_id IS DISTINCT FROM v_family_id then
+    raise exception 'Entries must use your family as recipient';
+  end if;
+
+  if v_date > v_today then
     raise exception 'Entry Date cannot be in the future';
   end if;
 
@@ -1801,15 +1821,19 @@ begin
   insert into public.ledger_entries (
     from_family_id,
     to_family_id,
-    entry_date,
+    type,
+    date,
     hours,
+    notes,
     request_id
   )
   values (
     p_from_family_id,
     p_to_family_id,
-    v_entry_date,
+    p_type,
+    v_date,
     p_hours,
+    p_notes,
     p_request_id
   )
   returning id into v_id;
@@ -1823,7 +1847,7 @@ create or replace function public.rpc_admin_create_ledger_entry(
   p_hours numeric,
   p_from_family_id uuid default null,
   p_to_family_id uuid default null,
-  p_entry_date date default null,
+  p_date date default null,
   p_notes text default null
 )
 returns uuid
@@ -1834,7 +1858,7 @@ as $$
 declare
   v_id uuid;
   v_today date := public.rpc_local_today();
-  v_entry_date date := coalesce(p_entry_date, v_today);
+  v_date date := coalesce(p_date, v_today);
 begin
   if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
@@ -1848,7 +1872,7 @@ begin
     raise exception 'From family and to family must be different';
   end if;
 
-  if v_entry_date > v_today then
+  if v_date > v_today then
     raise exception 'Entry Date cannot be in the future';
   end if;
 
@@ -1859,14 +1883,16 @@ begin
   insert into public.ledger_entries (
     from_family_id,
     to_family_id,
-    entry_date,
+    type,
+    date,
     hours,
     notes
   )
   values (
     p_from_family_id,
     p_to_family_id,
-    v_entry_date,
+    'admin',
+    v_date,
     p_hours,
     p_notes
   )
@@ -2236,7 +2262,7 @@ grant execute on function public.rpc_get_my_parent_profile() to authenticated, s
 grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 
 -- Families
-grant execute on function public.rpc_list_families_for_filters() to authenticated, service_role;
+grant execute on function public.rpc_list_families_all() to authenticated, service_role;
 grant execute on function public.rpc_list_families_active() to authenticated, service_role;
 
 -- Requests
@@ -2257,7 +2283,8 @@ grant execute on function public.rpc_unassign_request(uuid) to authenticated, se
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_requests_for_entry() to authenticated, service_role;
-grant execute on function public.rpc_create_ledger_entry(uuid, uuid, numeric, date, text, uuid) to authenticated, service_role;
+grant execute on function public.rpc_create_ledger_entry(uuid, uuid, text, numeric, date, text, uuid) to authenticated, service_role;
+grant execute on function public.rpc_create_transfer_entry(uuid, uuid, uuid, numeric, date, text) to authenticated, service_role;
 
 -- Admin
 grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
