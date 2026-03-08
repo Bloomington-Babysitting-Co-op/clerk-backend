@@ -2290,7 +2290,6 @@ grant execute on function public.rpc_list_ledger_balances() to authenticated, se
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_requests_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_create_ledger_entry(uuid, uuid, text, numeric, date, text, uuid) to authenticated, service_role;
-grant execute on function public.rpc_create_transfer_entry(uuid, uuid, uuid, numeric, date, text) to authenticated, service_role;
 
 -- Admin
 grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
