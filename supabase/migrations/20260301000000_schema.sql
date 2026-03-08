@@ -1731,6 +1731,7 @@ $$;
 create or replace function public.rpc_list_requests_for_entry()
 returns table (
   request_id uuid,
+  request_type uuid,
   from_family_id uuid,
   to_family_id uuid,
   from_family_name text,
@@ -1751,6 +1752,7 @@ as $$
   )
   select
     r.id as request_id,
+    r.type as request_type,
     r.requester_family_id as from_family_id,
     r.assignee_family_id as to_family_id,
     ff.name as from_family_name,
