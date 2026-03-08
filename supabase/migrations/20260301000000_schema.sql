@@ -1757,6 +1757,7 @@ as $$
   join public.families tf on r.assignee_family_id = tf.id
   cross join me
   where r.status = 'completed'
+    and r.date >= (public.rpc_local_today() - interval '1 month')::date
     and r.assignee_family_id = me.family_id
     and not exists (
       select 1
