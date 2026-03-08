@@ -52,7 +52,8 @@ create table public.family_parents (
   email_ledger_change boolean not null default false,
   email_request_new boolean not null default false,
   email_offer_change boolean not null default false,
-  email_midmonth_inactive boolean not null default false
+  email_midmonth_inactive boolean not null default false,
+  email_endmonth_summary boolean not null default false
 );
 
 create index family_parents_family_idx on public.family_parents(family_id);
@@ -768,7 +769,8 @@ returns table (
   email_ledger_change boolean,
   email_request_new boolean,
   email_offer_change boolean,
-  email_midmonth_inactive boolean
+  email_midmonth_inactive boolean,
+  email_endmonth_summary boolean
 )
 language sql
 stable
@@ -786,7 +788,8 @@ as $$
     fp.email_ledger_change,
     fp.email_request_new,
     fp.email_offer_change,
-    fp.email_midmonth_inactive
+    fp.email_midmonth_inactive,
+    fp.email_endmonth_summary
   from public.family_parents fp
   where fp.user_id = auth.uid();
 $$;
@@ -803,7 +806,8 @@ create or replace function public.rpc_update_my_parent_profile(
   p_email_ledger_change boolean default false,
   p_email_request_new boolean default false,
   p_email_offer_change boolean default false,
-  p_email_midmonth_inactive boolean default false
+  p_email_midmonth_inactive boolean default false,
+  p_email_endmonth_summary boolean default false
 )
 returns void
 language plpgsql
@@ -826,7 +830,8 @@ begin
     email_ledger_change = coalesce(p_email_ledger_change, false),
     email_request_new = coalesce(p_email_request_new, false),
     email_offer_change = coalesce(p_email_offer_change, false),
-    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false)
+    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false),
+    email_endmonth_summary = coalesce(p_email_endmonth_summary, false)
   where user_id = auth.uid();
 
   if not found then
@@ -2233,7 +2238,7 @@ grant execute on function public.rpc_update_my_family_photo(text) to authenticat
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
-grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
+grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 
 -- Families
 grant execute on function public.rpc_list_families_for_filters() to authenticated, service_role;
