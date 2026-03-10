@@ -1381,7 +1381,7 @@ end;
 $$;
 
 -- RPC: submit an offer on a request
-create or replace function public.rpc_offer_request(
+create or replace function public.rpc_create_offer(
   p_request_id uuid,
   p_notes text default null
 )
@@ -2253,7 +2253,7 @@ grant execute on function public.rpc_list_offers(uuid) to authenticated, service
 grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_update_request(uuid, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
-grant execute on function public.rpc_offer_request(uuid, text) to authenticated, service_role;
+grant execute on function public.rpc_create_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
 grant execute on function public.rpc_assign_request(uuid, uuid) to authenticated, service_role;
