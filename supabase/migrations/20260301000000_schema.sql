@@ -11,7 +11,10 @@ set client_min_messages = warning;
 set row_security = off;
 
 -- Extension: required for gen_random_uuid()
-create extension if not exists "pgcrypto" with schema "extensions";
+create extension if not exists pgcrypto with schema extensions;
+
+-- Extension: required for scheduled emails
+create extension if not exists pg_cron;
 
 -- Table: site_settings for simple key/value site configuration
 create table if not exists public.site_settings (
@@ -244,7 +247,7 @@ stable
 security definer
 set search_path = public
 as $$
-  select (now() at time zone 'America/Indiana/Indianapolis')::date;
+  select (now() at time zone 'America/Chicago')::date;
 $$;
 
 -- Function: canonical local month window bounds for monthly checks
@@ -320,6 +323,7 @@ $$;
 create or replace function public.rpc_my_family_id()
 returns uuid
 language plpgsql
+stable
 security definer
 set search_path = public
 as $$
@@ -1224,9 +1228,8 @@ begin
     if exists (
       select 1
       from unnest(p_child_ids) as child_id
-      left join public.family_children fc
-        on fc.id = child_id
-       and fc.family_id = v_family_id
+      left join public.family_children fc on fc.id = child_id
+        and fc.family_id = v_family_id
       where fc.id is null
     ) then
       raise exception 'Each selected child must belong to your family';
@@ -1337,9 +1340,8 @@ begin
     if exists (
       select 1
       from unnest(p_child_ids) as child_id
-      left join public.family_children fc
-        on fc.id = child_id
-       and fc.family_id = v_family_id
+      left join public.family_children fc on fc.id = child_id
+        and fc.family_id = v_family_id
       where fc.id is null
     ) then
       raise exception 'Each selected child must belong to your family';
@@ -1437,7 +1439,6 @@ declare
   v_offer_family_id uuid;
   v_requester_family_id uuid;
   v_request_status text;
-  v_assignee_family_id uuid;
 begin
   select o.request_id, o.family_id
   into v_offer_request_id, v_offer_family_id
@@ -1452,18 +1453,10 @@ begin
     raise exception 'Only the offering family can edit this offer';
   end if;
 
-  select r.requester_family_id, r.status, r.assignee_family_id
-  into v_requester_family_id, v_request_status, v_assignee_family_id
+  select r.requester_family_id, r.status
+  into v_requester_family_id, v_request_status
   from public.requests r
   where r.id = v_offer_request_id;
-
-  if v_requester_family_id is null then
-    raise exception 'Request not found';
-  end if;
-
-  if v_requester_family_id = v_family_id then
-    raise exception 'Requester cannot edit own offer';
-  end if;
 
   if v_request_status not in ('open', 'offered', 'assigned') then
     raise exception 'Offer cannot be edited in current request status';
@@ -1512,14 +1505,6 @@ begin
   from public.requests r
   where r.id = v_offer_request_id;
 
-  if v_requester_family_id is null then
-    raise exception 'Request not found';
-  end if;
-
-  if v_requester_family_id = v_family_id then
-    raise exception 'Requester cannot cancel own offer';
-  end if;
-
   if v_request_status not in ('open', 'offered', 'assigned') then
     raise exception 'Offer cannot be cancelled in current request status';
   end if;
@@ -1527,31 +1512,18 @@ begin
   delete from public.offers
   where id = p_offer_id;
 
-  if v_request_status = 'offered' then
-    if not exists (
-      select 1 from public.offers o where o.request_id = v_offer_request_id
-    ) then
-      update public.requests
-      set status = 'open'
-      where id = v_offer_request_id
-        and status = 'offered';
-    end if;
+  if not exists (
+    select 1 from public.offers o where o.request_id = v_offer_request_id
+  ) then
+    update public.requests
+    set status = 'open',
+        assignee_family_id = null
+    where id = v_offer_request_id;
   elsif v_request_status = 'assigned' and v_assignee_family_id = v_family_id then
-    if exists (
-      select 1 from public.offers o where o.request_id = v_offer_request_id
-    ) then
       update public.requests
       set status = 'offered',
           assignee_family_id = null
-      where id = v_offer_request_id
-        and status = 'assigned';
-    else
-      update public.requests
-      set status = 'open',
-          assignee_family_id = null
-      where id = v_offer_request_id
-        and status = 'assigned';
-    end if;
+      where id = v_offer_request_id;
   end if;
 end;
 $$;
