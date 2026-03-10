@@ -1703,7 +1703,7 @@ $$;
 create or replace function public.rpc_list_requests_for_entry()
 returns table (
   request_id uuid,
-  request_type uuid,
+  request_type text,
   from_family_id uuid,
   to_family_id uuid,
   from_family_name text,
