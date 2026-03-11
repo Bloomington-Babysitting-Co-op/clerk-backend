@@ -172,6 +172,58 @@ create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_date_idx on public.ledger_entries(date);
 create index ledger_request_id_idx on public.ledger_entries(request_id);
 
+create table public.email_log (
+  id uuid primary key default gen_random_uuid(),
+  email text not null,
+  type text not null,
+  source text not null,
+  meta jsonb not null default '{}'::jsonb,
+  sent_at timestamptz,
+  error text
+);
+
+-- Helper: enqueue an email
+create or replace function public.send_email(
+  p_email text,
+  p_type text,
+  p_source text,
+  p_meta jsonb default '{}'::jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email_log public.email_log%ROWTYPE;
+begin
+  insert into public.email_log (
+    email,
+    type,
+    source,
+    meta
+  )
+  values (
+    p_email,
+    p_type,
+    p_source,
+    p_meta
+  )
+  returning * into v_email_log;
+
+  begin
+    perform pg_notify('send_email', row_to_json(v_email_log)::text);
+
+    exception when others then
+      update public.email_log
+      set error = sqlerrm
+      where id = v_email_log.id;
+
+      raise log 'send_email failed: %', sqlerrm;
+  end;
+end;
+$$;
+
 -- Function: Bootstrap an initial admin family
 create or replace function public.rpc_bootstrap_admin(p_email text)
 returns void
@@ -297,6 +349,17 @@ as $$
     and le.date <= p_date;
 $$;
 
+-- Function: get the family name for a given family id
+create or replace function public.rpc_family_name(family_id uuid)
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select name from public.families where id = family_id;
+$$;
+
 -- Function: refresh request statuses based on date lifecycle
 create or replace function public.rpc_refresh_request_statuses()
 returns void
@@ -307,15 +370,69 @@ as $$
 declare
   v_today date := public.rpc_local_today();
 begin
-  update public.requests
-  set status = 'expired'
-  where date < v_today
-    and status in ('open', 'offered');
+  -- Expire requests that are past and were never assigned
+  for v_request in
+    select id, requester_family_id
+    from public.requests
+    where date < v_today
+      and status in ('open', 'offered');
+  loop
+    update public.requests
+    set status = 'expired'
+    where id = v_request.id;
 
-  update public.requests
-  set status = 'completed'
-  where date < v_today
-    and status = 'assigned';
+    -- Notify users who opted into email_offer_completed
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where fp.family_id = v_request.requester_family_id
+        and fp.email_request_expired = true
+        and f.is_active = true
+    loop
+      perform public.send_email(
+        v_rec.email,
+        'email_request_expired',
+        'rpc_refresh_request_statuses',
+        jsonb_build_object(
+          'request_id', v_request.id
+        )
+      );
+    end loop;
+  end loop;
+
+  -- Close requests that are past and were assigned
+  for v_request in
+    select id, assignee_family_id
+    from public.requests
+    where date < v_today
+      and status = 'assigned';
+  loop
+    update public.requests
+    set status = 'completed'
+    where id = v_request.id;
+
+    -- Notify users who opted into email_offer_completed
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where fp.family_id = v_request.assignee_family_id
+        and fp.email_offer_completed = true
+        and f.is_active = true
+    loop
+      perform public.send_email(
+        v_rec.email,
+        'email_offer_completed',
+        'rpc_refresh_request_statuses',
+        jsonb_build_object(
+          'request_id', v_request.id
+        )
+      );
+    end loop;
+  end loop;
 end;
 $$;
 
@@ -1140,13 +1257,13 @@ create or replace function public.rpc_create_request(
   p_origin text default null,
   p_destination text default null
 )
-returns uuid
+returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_id uuid;
+  v_request_id uuid;
   v_family_id uuid := public.rpc_my_family_id();
   v_hours numeric := p_hours;
 begin
@@ -1222,7 +1339,7 @@ begin
     case when p_type = 'drive' then p_destination else null end,
     'open'
   )
-  returning id into v_id;
+  returning id into v_request_id;
 
   if p_type = 'babysit' and coalesce(array_length(p_child_ids, 1), 0) > 0 then
     if exists (
@@ -1236,14 +1353,32 @@ begin
     end if;
 
     insert into public.request_children (request_id, child_id)
-    select v_id, child_id
+    select v_request_id, child_id
     from (
       select distinct child_id
       from unnest(p_child_ids) as child_id
     ) as c;
   end if;
 
-  return v_id;
+  -- Notify users who opted into email_request_new
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id <> v_family_id
+      and fp.email_request_new = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_request_new',
+      'rpc_create_request',
+      jsonb_build_object(
+        'request_id', v_request_id
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1273,8 +1408,8 @@ set search_path = public
 as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
-  v_hours numeric := p_hours;
   v_request_type text;
+  v_hours numeric := p_hours;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -1354,6 +1489,26 @@ begin
       from unnest(p_child_ids) as child_id
     ) as c;
   end if;
+
+  -- Notify users who opted into email_offer_change
+  for v_rec in
+    select distinct u.email as email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id in (select family_id from public.offers where request_id = p_request_id)
+      and fp.email_offer_change = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_offer_change',
+      'rpc_update_request',
+      jsonb_build_object(
+        'request_id', p_request_id
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1377,6 +1532,26 @@ begin
   if not found then
     raise exception 'Request not found or cannot be cancelled';
   end if;
+
+  -- Notify users who opted into email_offer_change
+  for v_rec in
+    select distinct u.email as email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id in (select family_id from public.offers where request_id = p_request_id)
+      and fp.email_offer_change = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_offer_change',
+      'rpc_cancel_request',
+      jsonb_build_object(
+        'request_id', p_request_id
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1392,11 +1567,13 @@ set search_path = public
 as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
-  v_request public.requests%rowtype;
+  v_requester_family_id uuid;
+  v_request_status text;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  select * into v_request
+  select requester_family_id, status
+  into v_requester_family_id, v_request_status
   from public.requests
   where id = p_request_id;
 
@@ -1404,11 +1581,11 @@ begin
     raise exception 'Request not found';
   end if;
 
-  if v_request.requester_family_id = v_family_id then
+  if v_requester_family_id = v_family_id then
     raise exception 'Requester cannot offer on own request';
   end if;
 
-  if v_request.status not in ('open', 'offered') then
+  if v_request_status not in ('open', 'offered') then
     raise exception 'Request cannot be offered in current status';
   end if;
 
@@ -1420,6 +1597,27 @@ begin
   set status = 'offered'
   where id = p_request_id
     and status = 'open';
+
+  -- Notify users who opted into email_request_offered
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id = v_requester_family_id
+      and fp.email_request_offered = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_request_offered',
+      'rpc_create_offer',
+      jsonb_build_object(
+        'request_id', p_request_id,
+        'offer_family_name', public.rpc_family_name(v_family_id)
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1465,6 +1663,27 @@ begin
   update public.offers
   set notes = p_notes
   where id = p_offer_id;
+
+  -- Notify users who opted into email_request_offered
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id = v_requester_family_id
+      and fp.email_request_offered = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_request_offered',
+      'rpc_update_offer',
+      jsonb_build_object(
+        'request_id', v_offer_request_id,
+        'offer_family_name', public.rpc_family_name(v_offer_family_id)
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1525,6 +1744,27 @@ begin
           assignee_family_id = null
       where id = v_offer_request_id;
   end if;
+
+  -- Notify users who opted into email_request_offered
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id = v_requester_family_id
+      and fp.email_request_offered = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_request_offered',
+      'rpc_cancel_offer',
+      jsonb_build_object(
+        'request_id', v_offer_request_id,
+        'offer_family_name', public.rpc_family_name(v_offer_family_id)
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1576,6 +1816,26 @@ begin
   set status = 'assigned',
       assignee_family_id = v_offer_family_id
   where id = p_request_id;
+
+  -- Notify users who opted into email_offer_assigned
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id = v_offer_family_id
+      and fp.email_offer_assigned = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_offer_assigned',
+      'rpc_assign_request',
+      jsonb_build_object(
+        'request_id', p_request_id
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1592,11 +1852,12 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_requester_family_id uuid;
   v_status text;
+  v_assignee_family_id uuid;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  select requester_family_id, status
-  into v_requester_family_id, v_status
+  select requester_family_id, status, assignee_family_id
+  into v_requester_family_id, v_status, v_assignee_family_id
   from public.requests
   where id = p_request_id;
 
@@ -1620,6 +1881,26 @@ begin
       assignee_family_id = null
   where id = p_request_id
     and status = 'assigned';
+
+  -- Notify users who opted into email_offer_assigned
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id = v_assignee_family_id
+      and fp.email_offer_assigned = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_offer_assigned',
+      'rpc_unassign_request',
+      jsonb_build_object(
+        'request_id', p_request_id
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1767,13 +2048,13 @@ create or replace function public.rpc_create_ledger_entry(
   p_notes text default null,
   p_request_id uuid default null
 )
-returns uuid
+returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_id uuid;
+  v_entry_id uuid;
   v_family_id uuid := public.rpc_my_family_id();
   v_today date := public.rpc_local_today();
   v_date date := coalesce(p_date, v_today);
@@ -1816,9 +2097,29 @@ begin
     p_notes,
     p_request_id
   )
-  returning id into v_id;
+  returning id into v_entry_id;
 
-  return v_id;
+  -- Notify users who opted into email_ledger_change
+  for v_rec in
+    select u.email, fp.family_id
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id IN (p_from_family_id,p_to_family_id)
+      and fp.email_ledger_change = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_ledger_change',
+      'rpc_create_ledger_entry',
+      jsonb_build_object(
+        'ledger_id', v_entry_id,
+        'hours_delta', case when v_rec.family_id = p_from_family_id then -p_hours else p_hours end,
+        'current_balance', public.rpc_hours_balance_as_of(v_rec.family_id, public.rpc_local_today())
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1830,13 +2131,13 @@ create or replace function public.rpc_admin_create_ledger_entry(
   p_date date default null,
   p_notes text default null
 )
-returns uuid
+returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_id uuid;
+  v_entry_id uuid;
   v_today date := public.rpc_local_today();
   v_date date := coalesce(p_date, v_today);
 begin
@@ -1876,9 +2177,29 @@ begin
     p_hours,
     p_notes
   )
-  returning id into v_id;
+  returning id into v_entry_id;
 
-  return v_id;
+  -- Notify users who opted into email_ledger_change
+  for v_rec in
+    select u.email, fp.family_id
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id IN (p_from_family_id,p_to_family_id)
+      and fp.email_ledger_change = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_ledger_change',
+      'rpc_create_ledger_entry',
+      jsonb_build_object(
+        'ledger_id', v_entry_id,
+        'hours_delta', case when v_rec.family_id = p_from_family_id then -p_hours else p_hours end,
+        'current_balance', public.rpc_hours_balance_as_of(v_rec.family_id, public.rpc_local_today())
+      )
+    );
+  end loop;
 end;
 $$;
 
@@ -1948,13 +2269,11 @@ $$;
 
 -- RPC: create a family by name for admin management
 create or replace function public.rpc_admin_create_family(p_name text)
-returns uuid
+returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_id uuid;
 begin
   if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
@@ -1965,10 +2284,7 @@ begin
   end if;
 
   insert into public.families (name)
-  values (btrim(p_name))
-  returning id into v_id;
-
-  return v_id;
+  values (btrim(p_name));
 end;
 $$;
 
@@ -2277,3 +2593,84 @@ grant execute on function public.rpc_get_dashboard_banner() to authenticated, se
 grant execute on function public.rpc_admin_upsert_dashboard_banner(boolean, text, text, text) to authenticated, service_role;
 grant execute on function public.rpc_get_dashboard_links() to authenticated, service_role;
 grant execute on function public.rpc_admin_upsert_dashboard_links(jsonb) to authenticated, service_role;
+
+-- Scheduled cron functions
+create or replace function public.cron_refresh_request_statuses()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_today date := public.rpc_local_today();
+  v_month_start date := public.rpc_local_month_start();
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  -- Notify users who opted into email_request_unoffered
+  for v_rec in
+    select u.email, r.id
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    join public.requests r on r.requester_family_id = fp.family_id
+    where r.status in ('open','offered')
+      and r.date = (v_today + interval '2 days')::date
+      and fp.email_request_unoffered = true
+      and f.is_active = true
+  loop
+    perform public.send_email(
+      v_rec.email,
+      'email_request_unoffered',
+      'cron_refresh_request_statuses',
+      jsonb_build_object(
+        'request_id', v_rec.id
+      )
+    );
+  end loop;
+
+  -- Notify users who opted into email_midmonth_inactive
+  if v_today = (v_month_start + interval '15 days')::date then
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where public.rpc_active_this_month(fp.family_id) = false
+        and fp.email_midmonth_inactive = true
+        and f.is_active = true
+    loop
+      perform public.send_email(
+        v_rec.email,
+        'email_midmonth_inactive',
+        'cron_refresh_request_statuses'
+      );
+    end loop;
+  end if;
+
+  -- Notify users who opted into email_endmonth_summary
+  if v_today = v_month_start then
+    for v_rec in
+      select u.email, fp.family_id
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where fp.email_endmonth_summary = true
+        and f.is_active = true
+    loop
+      perform public.send_email(
+        v_rec.email,
+        'email_endmonth_summary',
+        'cron_refresh_request_statuses',
+        jsonb_build_object(
+          'start_balance', public.rpc_hours_balance_as_of(v_rec.family_id, (v_month_start - interval '1 month')::date),
+          'end_balance', public.rpc_hours_balance_as_of(v_rec.family_id, (v_month_start - interval '1 day')::date)
+        )
+      );
+    end loop;
+  end if;
+end;
+$$;
+
+-- Schedule the cron job (times are UTC)
+select cron.schedule('11 0 * * *', $$CALL public.cron_refresh_request_statuses();$$);
