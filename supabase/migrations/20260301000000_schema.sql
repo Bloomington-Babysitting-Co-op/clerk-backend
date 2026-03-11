@@ -369,13 +369,15 @@ set search_path = public
 as $$
 declare
   v_today date := public.rpc_local_today();
+  v_request record;
+  v_rec record;
 begin
   -- Expire requests that are past and were never assigned
   for v_request in
     select id, requester_family_id
     from public.requests
     where date < v_today
-      and status in ('open', 'offered');
+      and status in ('open', 'offered')
   loop
     update public.requests
     set status = 'expired'
@@ -407,7 +409,7 @@ begin
     select id, assignee_family_id
     from public.requests
     where date < v_today
-      and status = 'assigned';
+      and status = 'assigned'
   loop
     update public.requests
     set status = 'completed'
@@ -1266,6 +1268,7 @@ declare
   v_request_id uuid;
   v_family_id uuid := public.rpc_my_family_id();
   v_hours numeric := p_hours;
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -1410,6 +1413,7 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_request_type text;
   v_hours numeric := p_hours;
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -1521,6 +1525,7 @@ set search_path = public
 as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
+  v_rec record;
 begin
   update public.requests
   set status = 'cancelled',
@@ -1569,6 +1574,7 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_requester_family_id uuid;
   v_request_status text;
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -1637,6 +1643,7 @@ declare
   v_offer_family_id uuid;
   v_requester_family_id uuid;
   v_request_status text;
+  v_rec record;
 begin
   select o.request_id, o.family_id
   into v_offer_request_id, v_offer_family_id
@@ -1703,6 +1710,7 @@ declare
   v_requester_family_id uuid;
   v_request_status text;
   v_assignee_family_id uuid;
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -1783,6 +1791,7 @@ declare
   v_requester_family_id uuid;
   v_status text;
   v_offer_family_id uuid;
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -1853,6 +1862,7 @@ declare
   v_requester_family_id uuid;
   v_status text;
   v_assignee_family_id uuid;
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
@@ -2058,6 +2068,7 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_today date := public.rpc_local_today();
   v_date date := coalesce(p_date, v_today);
+  v_rec record;
 begin
   if p_from_family_id IS NOT DISTINCT FROM p_to_family_id then
     raise exception 'From family and to family must be different';
@@ -2140,6 +2151,7 @@ declare
   v_entry_id uuid;
   v_today date := public.rpc_local_today();
   v_date date := coalesce(p_date, v_today);
+  v_rec record;
 begin
   if not public.rpc_my_is_admin() then
     raise exception 'Admin only';
@@ -2604,6 +2616,7 @@ as $$
 declare
   v_today date := public.rpc_local_today();
   v_month_start date := public.rpc_local_month_start();
+  v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
