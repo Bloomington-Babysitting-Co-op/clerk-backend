@@ -172,14 +172,13 @@ create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_date_idx on public.ledger_entries(date);
 create index ledger_request_id_idx on public.ledger_entries(request_id);
 
-create table public.email_log (
+create table public.email_queue (
   id uuid primary key default gen_random_uuid(),
   email text not null,
   type text not null,
   source text not null,
   meta jsonb not null default '{}'::jsonb,
-  sent_at timestamptz,
-  error text
+  sent_at timestamptz not null default now()
 );
 
 -- Helper: enqueue an email
@@ -194,10 +193,9 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_email_log public.email_log%ROWTYPE;
 begin
-  insert into public.email_log (
+  -- A webhook listener on inserts to public.email_queue invokes the send-email edge function
+  insert into public.email_queue (
     email,
     type,
     source,
@@ -208,19 +206,7 @@ begin
     p_type,
     p_source,
     p_meta
-  )
-  returning * into v_email_log;
-
-  begin
-    perform pg_notify('send_email', row_to_json(v_email_log)::text);
-
-    exception when others then
-      update public.email_log
-      set error = sqlerrm
-      where id = v_email_log.id;
-
-      raise log 'send_email failed: %', sqlerrm;
-  end;
+  );
 end;
 $$;
 
