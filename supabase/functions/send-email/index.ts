@@ -38,34 +38,113 @@ function btn(href: string, label: string): string {
   return `<a href="${href}" style="display: block; background-color: #1d4ed8; color: #ffffff; text-align: center; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-size: 15px; font-weight: 500; margin-bottom: 16px;">${label}</a>`;
 }
 
-function requestUrl(requestId: string): string {
-  return `${FRONTEND_URL}/request-view?id=${requestId}`;
+function formatHours(value: number): string {
+  const sign = value >= 0 ? '+' : '';
+  const color = value >= 0 ? '#16a34a' : '#dc2626';
+  return `<strong style="color: ${color};">${sign}${value.toFixed(2)} hours</strong>`;
+}
+
+function requestViewUrl(requestId: unknown): string {
+  return `${FRONTEND_URL}/request-view?id=${String(requestId)}`;
+}
+
+function requestListUrl(): string {
+  return `${FRONTEND_URL}/requests`;
 }
 
 function ledgerUrl(): string {
   return `${FRONTEND_URL}/ledger`;
 }
 
-function profileUrl(): string {
-  return `${FRONTEND_URL}/profile`;
-}
-
 // ─── Template map ─────────────────────────────────────────────────────────────
 
-type Meta = Record<string, unknown>;
+type Meta = Record<string, unknown> & { source: string };
 
 const templates: Record<string, (meta: Meta) => { subject: string; html: string }> = {
 
-  // Someone offered to help with your request
-  email_request_offered: (meta) => ({
-    subject: 'New offer on your request',
+  // End-of-month hours summary (1st of next month)
+  email_endmonth_summary: (meta) => {
+    const start = Number(meta.start_balance ?? 0);
+    const end = Number(meta.end_balance ?? 0);
+    return {
+      subject: 'Your monthly hours summary',
+      html: layout(`
+        ${heading('Monthly summary')}
+        ${body(`Here is your hours balance summary for last month:`)}
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 14px;">
+          <tr>
+            <td style="padding: 6px 8px; color: #6b7280; border-bottom: 1px solid #f3f4f6;">Opening balance</td>
+            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${formatHours(start)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 8px; color: #6b7280; border-bottom: 1px solid #f3f4f6;">Month change</td>
+            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${formatHours(end - start)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 8px; color: #6b7280;">Closing balance</td>
+            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827;">${formatHours(end)}</td>
+          </tr>
+        </table>
+        ${btn(ledgerUrl(), 'View ledger')}
+      `),
+    };
+  },
+
+  // Mid-month inactive reminder (15th of month)
+  email_midmonth_inactive: (_meta) => ({
+    subject: 'Mid-month activity reminder',
     html: layout(`
-      ${heading('Someone offered to help')}
-      ${body(`<strong>${meta.offer_family_name ?? 'A family'}</strong> has submitted an offer on your request.`)}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
-      ${muted('Log in to review offers and assign a helper.')}
+      ${heading('No activity recorded yet this month')}
+      ${body("You haven't participated in the co-op this month.")}
+      ${btn(requestListUrl(), 'View available requests')}
+      ${muted('Log in to offer help or create a new request in BBC Clerk.')}
     `),
   }),
+
+  // Your hours balance changed
+  email_ledger_change: (meta) => {
+    const delta = Number(meta.hours_delta ?? 0);
+    const balance = Number(meta.current_balance ?? 0);
+    return {
+      subject: 'Your hours balance has changed',
+      html: layout(`
+        ${heading('Hours balance updated')}
+        ${body(`A ledger entry was recorded: ${formatHours(delta)}.`)}
+        ${body(`Your current balance is: ${formatHours(balance)}.`)}
+        ${btn(ledgerUrl(), 'View ledger')}
+        ${muted('Contact a co-op admin if you believe this entry is incorrect.')}
+      `),
+    };
+  },
+
+  // A new request was posted by any other family
+  email_request_new: (meta) => ({
+    subject: 'New request posted',
+    html: layout(`
+      ${heading('New request available')}
+      ${body('A family has posted a new request.')}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
+      ${muted('Log in to view details and submit an offer.')}
+    `),
+  }),
+
+  // Someone offered to help with your request
+  email_request_offered: (meta) => {
+    const action = ({
+      rpc_create_offer: 'submitted',
+      rpc_update_offer: 'updated',
+      rpc_cancel_offer: 'cancelled'
+    } as Record<string,string>)[meta.source] ?? 'changed';
+    return {
+      subject: `Your request has a ${action} offer`,
+      html: layout(`
+        ${heading('Someone offered to help')}
+        ${body(`<strong>${meta.offer_family_name ?? 'A family'}</strong> has ${action} an offer on your request.`)}
+        ${btn(requestViewUrl(meta.request_id), 'View request')}
+        ${muted('Log in to review offers and assign a helper.')}
+      `),
+    };
+  },
 
   // Your request was never assigned and is approaching expiry (2 days out)
   email_request_unoffered: (meta) => ({
@@ -73,7 +152,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     html: layout(`
       ${heading('No offers yet')}
       ${body('Your upcoming request has not received any offers and is 2 days away.')}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('Consider reaching out to co-op members directly if you need coverage.')}
     `),
   }),
@@ -84,109 +163,53 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     html: layout(`
       ${heading('Request expired')}
       ${body('Your request passed without being assigned to a helper.')}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('You can submit a new request if you still need help.')}
     `),
   }),
 
-  // A new request was posted by any other family
-  email_request_new: (meta) => ({
-    subject: 'New request posted',
-    html: layout(`
-      ${heading('New request available')}
-      ${body('A family has posted a new request. Log in to view details and submit an offer.')}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
-      ${muted('You are receiving this because you opted into new request notifications.')}
-    `),
-  }),
-
   // Your offer was accepted / unassigned (offer_assigned covers both directions)
-  email_offer_assigned: (meta) => ({
-    subject: 'Update on your offer',
-    html: layout(`
-      ${heading('Your offer status changed')}
-      ${body('Your offer on a co-op request has been updated. Log in to see the current assignment status.')}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
-      ${muted('Contact the requesting family if you have questions.')}
-    `),
-  }),
-
-  // A sit you were assigned to has been completed
-  email_offer_completed: (meta) => ({
-    subject: 'Sit marked as completed',
-    html: layout(`
-      ${heading('Sit completed')}
-      ${body('A request you were assigned to has been marked as completed. You may now select it to submit a ledger entry.')}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
-      ${btn(ledgerUrl(), 'Submit ledger entry')}
-      ${muted('A ledger entry should be created to record the hours.')}
-    `),
-  }),
-
-  // A request you offered on was updated or cancelled
-  email_offer_change: (meta) => ({
-    subject: 'A request you offered on has changed',
-    html: layout(`
-      ${heading('Request updated')}
-      ${body('A request you submitted an offer on has been updated or cancelled.')}
-      ${btn(requestUrl(meta.request_id as string), 'View request')}
-      ${muted('Log in to review the current state of the request.')}
-    `),
-  }),
-
-  // Your hours balance changed
-  email_ledger_change: (meta) => {
-    const delta = Number(meta.hours_delta ?? 0);
-    const balance = Number(meta.current_balance ?? 0);
-    const sign = delta >= 0 ? '+' : '';
+  email_offer_assigned: (meta) => {
+    const action = ({
+      rpc_assign_request: 'assigned',
+      rpc_unassign_request: 'unassigned'
+    } as Record<string,string>)[meta.source] ?? 'changed';
     return {
-      subject: 'Your hours balance changed',
+      subject: `Your offer has been ${action}`,
       html: layout(`
-        ${heading('Hours balance updated')}
-        ${body(`A ledger entry was recorded: <strong>${sign}${delta.toFixed(2)} hours</strong>. Your current balance is <strong>${balance.toFixed(2)} hours</strong>.`)}
-        ${btn(ledgerUrl(), 'View ledger')}
-        ${muted('Contact a co-op admin if you believe this entry is incorrect.')}
+        ${heading('Your offer status changed')}
+        ${body(`Your offer on a request has been ${action}.`)}
+        ${btn(requestViewUrl(meta.request_id), 'View request')}
+        ${muted('Log in to view details.')}
       `),
     };
   },
 
-  // Mid-month inactive reminder (15th of month)
-  email_midmonth_inactive: (_meta) => ({
-    subject: 'Mid-month activity reminder',
+  // A request you were assigned to has been completed
+  email_offer_completed: (meta) => ({
+    subject: 'Request marked as completed',
     html: layout(`
-      ${heading('No activity recorded yet this month')}
-      ${body("You haven't participated in the co-op this month. Active participation keeps the co-op healthy.")}
-      ${btn(`${FRONTEND_URL}/`, 'View available requests')}
-      ${muted('You can offer to help on any future request in BBC Clerk.')}
+      ${heading('Request completed')}
+      ${body('A request you were assigned to has been marked as completed.')}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
+      ${btn(ledgerUrl(), 'Submit ledger entry')}
+      ${muted('Log in to create a ledger entry and record the hours.')}
     `),
   }),
 
-  // End-of-month hours summary (1st of next month)
-  email_endmonth_summary: (meta) => {
-    const start = Number(meta.start_balance ?? 0);
-    const end = Number(meta.end_balance ?? 0);
-    const delta = end - start;
-    const sign = delta >= 0 ? '+' : '';
+  // A request you offered on was updated or cancelled
+  email_offer_change: (meta) => {
+    const action = ({
+      rpc_update_request: 'updated',
+      rpc_cancel_request: 'cancelled'
+    } as Record<string,string>)[meta.source] ?? 'updated or cancelled';
     return {
-      subject: 'Your monthly hours summary',
+      subject: 'A request you offered on has changed',
       html: layout(`
-        ${heading('Monthly summary')}
-        ${body(`Here is your hours balance summary for last month:`)}
-        <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 14px;">
-          <tr>
-            <td style="padding: 6px 8px; color: #6b7280; border-bottom: 1px solid #f3f4f6;">Opening balance</td>
-            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${start.toFixed(2)} hours</td>
-          </tr>
-          <tr>
-            <td style="padding: 6px 8px; color: #6b7280; border-bottom: 1px solid #f3f4f6;">Month change</td>
-            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${sign}${delta.toFixed(2)} hours</td>
-          </tr>
-          <tr>
-            <td style="padding: 6px 8px; color: #6b7280;">Closing balance</td>
-            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827;">${end.toFixed(2)} hours</td>
-          </tr>
-        </table>
-        ${btn(ledgerUrl(), 'View ledger')}
+        ${heading('Request updated')}
+        ${body(`A request you submitted an offer on has been ${action}.`)}
+        ${btn(requestViewUrl(meta.request_id), 'View request')}
+        ${muted('Log in to review the current state of the request.')}
       `),
     };
   },
@@ -195,20 +218,20 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
-  const authHeader = req.headers.get('authorization') || '';
-  if (!WEBHOOK_KEY || authHeader !== `Bearer ${WEBHOOK_KEY}`) {
+  const webhookKeyHeader = req.headers.get('x-supabase-webhook-source') || '';
+  if (!WEBHOOK_KEY || webhookKeyHeader !== WEBHOOK_KEY) {
     console.warn('send-email: unauthorized webhook request');
     return new Response('Unauthorized', { status: 401 });
   }
 
   let payload = await req.json();
 
-  // Normalize/unpack common webhook shapes so they still arrive as the expected { email, type, meta } payload.
+  // Normalize/unpack common webhook shapes so they still arrive as the expected { email, type, source, meta } payload.
   try {
     if (payload && typeof payload === 'object') {
       if (typeof payload.payload === 'string') {
         try { payload = JSON.parse(payload.payload); } catch (_) { }
-      } else if (payload.record && (payload.record.email || payload.record.type)) {
+      } else if (payload.record && (payload.record.email || payload.record.type || payload.record.source)) {
         payload = payload.record;
       } else if (payload.body && typeof payload.body === 'string') {
         try { payload = JSON.parse(payload.body); } catch (_) { }
@@ -222,14 +245,14 @@ Deno.serve(async (req) => {
   console.log('send-email received payload:', JSON.stringify(payload));
 
   // Accepts either a direct {to, subject, html} call (existing usage)
-  // or a pg_notify payload {email, type, meta}
+  // or a webhook trigger payload {email, type, source, meta}
   let to: string;
   let subject: string;
   let html: string;
 
-  if (payload.type && payload.email) {
-    // Called from pg_notify via realtime/webhook
-    const { email, type, meta = {} } = payload;
+  if (payload.email && payload.type && payload.source) {
+    // Called from webhook trigger on public.email_queue
+    const { email, type, source, meta = {} } = payload;
     const template = templates[type];
     if (!template) {
       return new Response(JSON.stringify({ error: `Unknown email type: ${type}` }), {
@@ -237,7 +260,9 @@ Deno.serve(async (req) => {
         headers: { 'Content-Type': 'application/json' },
       });
     }
-    const rendered = template(meta as Meta);
+    // Merge `source` into the meta object so templates can reference it
+    const mergedMeta: Meta = { ...(meta ?? {}), source };
+    const rendered = template(mergedMeta);
     to = email;
     subject = rendered.subject;
     html = rendered.html;
