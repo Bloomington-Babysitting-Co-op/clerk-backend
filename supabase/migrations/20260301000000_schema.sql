@@ -47,8 +47,8 @@ create table public.family_parents (
   family_id uuid not null references public.families(id) on delete cascade,
   name text,
   phone text,
-  email_midmonth_inactive boolean not null default false,
   email_endmonth_summary boolean not null default false,
+  email_midmonth_inactive boolean not null default false,
   email_ledger_change boolean not null default false,
   email_request_new boolean not null default false,
   email_request_offered boolean not null default false,
@@ -876,8 +876,8 @@ create or replace function public.rpc_get_my_parent_profile()
 returns table (
   name text,
   phone text,
-  email_midmonth_inactive boolean,
   email_endmonth_summary boolean,
+  email_midmonth_inactive boolean,
   email_ledger_change boolean,
   email_request_new boolean,
   email_request_offered boolean,
@@ -895,8 +895,8 @@ as $$
   select
     fp.name,
     fp.phone,
-    fp.email_midmonth_inactive,
     fp.email_endmonth_summary,
+    fp.email_midmonth_inactive,
     fp.email_ledger_change,
     fp.email_request_new,
     fp.email_request_offered,
@@ -913,8 +913,8 @@ $$;
 create or replace function public.rpc_update_my_parent_profile(
   p_name text default null,
   p_phone text default null,
-  p_email_midmonth_inactive boolean default false,
   p_email_endmonth_summary boolean default false,
+  p_email_midmonth_inactive boolean default false,
   p_email_ledger_change boolean default false,
   p_email_request_new boolean default false,
   p_email_request_offered boolean default false,
@@ -937,8 +937,8 @@ begin
     family_id = v_family_id,
     name = nullif(btrim(p_name), ''),
     phone = nullif(btrim(p_phone), ''),
-    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false),
     email_endmonth_summary = coalesce(p_email_endmonth_summary, false),
+    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false),
     email_ledger_change = coalesce(p_email_ledger_change, false),
     email_request_new = coalesce(p_email_request_new, false),
     email_request_offered = coalesce(p_email_request_offered, false),
@@ -2628,25 +2628,6 @@ begin
     );
   end loop;
 
-  -- Notify users who opted into email_midmonth_inactive
-  if v_today = (v_month_start + interval '15 days')::date then
-    for v_rec in
-      select u.email
-      from auth.users u
-      join public.family_parents fp on fp.user_id = u.id
-      join public.families f on f.id = fp.family_id
-      where public.rpc_active_this_month(fp.family_id) = false
-        and fp.email_midmonth_inactive = true
-        and f.is_active = true
-    loop
-      perform public.rpc_send_email(
-        v_rec.email,
-        'email_midmonth_inactive',
-        'cron_refresh_request_statuses'
-      );
-    end loop;
-  end if;
-
   -- Notify users who opted into email_endmonth_summary
   if v_today = v_month_start then
     for v_rec in
@@ -2665,6 +2646,25 @@ begin
           'start_balance', public.rpc_hours_balance_as_of(v_rec.family_id, (v_month_start - interval '1 month')::date),
           'end_balance', public.rpc_hours_balance_as_of(v_rec.family_id, (v_month_start - interval '1 day')::date)
         )
+      );
+    end loop;
+  end if;
+
+  -- Notify users who opted into email_midmonth_inactive
+  if v_today = (v_month_start + interval '15 days')::date then
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where public.rpc_active_this_month(fp.family_id) = false
+        and fp.email_midmonth_inactive = true
+        and f.is_active = true
+    loop
+      perform public.rpc_send_email(
+        v_rec.email,
+        'email_midmonth_inactive',
+        'cron_refresh_request_statuses'
       );
     end loop;
   end if;
