@@ -1,8 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
-const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')!;
-const RESEND_FROM_EMAIL = Deno.env.get('RESEND_FROM_EMAIL')!;
 const FRONTEND_URL = Deno.env.get('FRONTEND_URL')!;
+const RESEND_FROM_EMAIL = Deno.env.get('RESEND_FROM_EMAIL')!;
+const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')!;
+const WEBHOOK_KEY = Deno.env.get('WEBHOOK_KEY')!;
 
 // ─── Shared layout wrapper ────────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       subject: 'Your hours balance changed',
       html: layout(`
         ${heading('Hours balance updated')}
-        ${body(`A ledger entry was recorded: <strong>${sign}${delta.toFixed(2)} hrs</strong>. Your current balance is <strong>${balance.toFixed(2)} hrs</strong>.`)}
+        ${body(`A ledger entry was recorded: <strong>${sign}${delta.toFixed(2)} hours</strong>. Your current balance is <strong>${balance.toFixed(2)} hours</strong>.`)}
         ${btn(ledgerUrl(), 'View ledger')}
         ${muted('Contact a co-op admin if you believe this entry is incorrect.')}
       `),
@@ -174,15 +175,15 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
         <table style="width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 14px;">
           <tr>
             <td style="padding: 6px 8px; color: #6b7280; border-bottom: 1px solid #f3f4f6;">Opening balance</td>
-            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${start.toFixed(2)} hrs</td>
+            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${start.toFixed(2)} hours</td>
           </tr>
           <tr>
             <td style="padding: 6px 8px; color: #6b7280; border-bottom: 1px solid #f3f4f6;">Month change</td>
-            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${sign}${delta.toFixed(2)} hrs</td>
+            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827; border-bottom: 1px solid #f3f4f6;">${sign}${delta.toFixed(2)} hours</td>
           </tr>
           <tr>
             <td style="padding: 6px 8px; color: #6b7280;">Closing balance</td>
-            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827;">${end.toFixed(2)} hrs</td>
+            <td style="padding: 6px 8px; text-align: right; font-weight: 600; color: #111827;">${end.toFixed(2)} hours</td>
           </tr>
         </table>
         ${btn(ledgerUrl(), 'View ledger')}
@@ -194,7 +195,31 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
-  const payload = await req.json();
+  const authHeader = req.headers.get('authorization') || '';
+  if (!WEBHOOK_KEY || authHeader !== `Bearer ${WEBHOOK_KEY}`) {
+    console.warn('send-email: unauthorized webhook request');
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  let payload = await req.json();
+
+  // Normalize/unpack common webhook shapes so they still arrive as the expected { email, type, meta } payload.
+  try {
+    if (payload && typeof payload === 'object') {
+      if (typeof payload.payload === 'string') {
+        try { payload = JSON.parse(payload.payload); } catch (_) { }
+      } else if (payload.record && (payload.record.email || payload.record.type)) {
+        payload = payload.record;
+      } else if (payload.body && typeof payload.body === 'string') {
+        try { payload = JSON.parse(payload.body); } catch (_) { }
+      }
+    }
+  } catch (err) {
+    console.error('send-email: failed to normalize payload', err);
+  }
+
+  // Helpful debug log to inspect incoming shapes when troubleshooting
+  console.log('send-email received payload:', JSON.stringify(payload));
 
   // Accepts either a direct {to, subject, html} call (existing usage)
   // or a pg_notify payload {email, type, meta}
