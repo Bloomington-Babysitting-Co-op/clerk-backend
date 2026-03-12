@@ -182,7 +182,7 @@ create table public.email_queue (
 );
 
 -- Helper: enqueue an email
-create or replace function public.send_email(
+create or replace function public.rpc_send_email(
   p_email text,
   p_type text,
   p_source text,
@@ -379,7 +379,7 @@ begin
         and fp.email_request_expired = true
         and f.is_active = true
     loop
-      perform public.send_email(
+      perform public.rpc_send_email(
         v_rec.email,
         'email_request_expired',
         'rpc_refresh_request_statuses',
@@ -411,7 +411,7 @@ begin
         and fp.email_offer_completed = true
         and f.is_active = true
     loop
-      perform public.send_email(
+      perform public.rpc_send_email(
         v_rec.email,
         'email_offer_completed',
         'rpc_refresh_request_statuses',
@@ -1359,7 +1359,7 @@ begin
       and fp.email_request_new = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_request_new',
       'rpc_create_request',
@@ -1490,7 +1490,7 @@ begin
       and fp.email_offer_change = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_offer_change',
       'rpc_update_request',
@@ -1534,7 +1534,7 @@ begin
       and fp.email_offer_change = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_offer_change',
       'rpc_cancel_request',
@@ -1600,7 +1600,7 @@ begin
       and fp.email_request_offered = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_request_offered',
       'rpc_create_offer',
@@ -1667,7 +1667,7 @@ begin
       and fp.email_request_offered = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_request_offered',
       'rpc_update_offer',
@@ -1749,7 +1749,7 @@ begin
       and fp.email_request_offered = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_request_offered',
       'rpc_cancel_offer',
@@ -1822,7 +1822,7 @@ begin
       and fp.email_offer_assigned = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_offer_assigned',
       'rpc_assign_request',
@@ -1888,7 +1888,7 @@ begin
       and fp.email_offer_assigned = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_offer_assigned',
       'rpc_unassign_request',
@@ -2106,7 +2106,7 @@ begin
       and fp.email_ledger_change = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_ledger_change',
       'rpc_create_ledger_entry',
@@ -2187,7 +2187,7 @@ begin
       and fp.email_ledger_change = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_ledger_change',
       'rpc_create_ledger_entry',
@@ -2618,7 +2618,7 @@ begin
       and fp.email_request_unoffered = true
       and f.is_active = true
   loop
-    perform public.send_email(
+    perform public.rpc_send_email(
       v_rec.email,
       'email_request_unoffered',
       'cron_refresh_request_statuses',
@@ -2639,7 +2639,7 @@ begin
         and fp.email_midmonth_inactive = true
         and f.is_active = true
     loop
-      perform public.send_email(
+      perform public.rpc_send_email(
         v_rec.email,
         'email_midmonth_inactive',
         'cron_refresh_request_statuses'
@@ -2657,7 +2657,7 @@ begin
       where fp.email_endmonth_summary = true
         and f.is_active = true
     loop
-      perform public.send_email(
+      perform public.rpc_send_email(
         v_rec.email,
         'email_endmonth_summary',
         'cron_refresh_request_statuses',
