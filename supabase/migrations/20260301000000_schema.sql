@@ -2672,4 +2672,4 @@ end;
 $$;
 
 -- Schedule the cron job (times are UTC)
-select cron.schedule('11 0 * * *', $$CALL public.cron_refresh_request_statuses();$$);
+select cron.schedule('11 0 * * *', $$select public.cron_refresh_request_statuses();$$);
