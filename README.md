@@ -11,7 +11,7 @@ npx supabase link --project-ref <your-project-ref>
 1. Clone this repo
 2. Install dependencies
    ```
-   npm install
+   npm install -upgrade
    ```
 3. Ensure Docker Desktop is running
 4. Start the local Supabase stack
@@ -26,7 +26,7 @@ npx supabase link --project-ref <your-project-ref>
 ## Deploy
 1. Push migrations to remote with `npx supabase db push`
 
-## Bootstrap
+### Initial Setup
 1. Create an initial user in the [Supabase Authentication dashboard](https://supabase.com/dashboard/project/_/auth/users)
 2. Open the [Supabase Storage Files dashboard](https://supabase.com/dashboard/project/_/storage/files) and create a private bucket named `family-photos`
 3. Open the [Supabase SQL Editor dashboard](https://supabase.com/dashboard/project/_/sql) and run the below (changing the email)
