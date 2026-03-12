@@ -47,16 +47,16 @@ create table public.family_parents (
   family_id uuid not null references public.families(id) on delete cascade,
   name text,
   phone text,
+  email_midmonth_inactive boolean not null default false,
+  email_endmonth_summary boolean not null default false,
+  email_ledger_change boolean not null default false,
+  email_request_new boolean not null default false,
   email_request_offered boolean not null default false,
   email_request_unoffered boolean not null default false,
   email_request_expired boolean not null default false,
   email_offer_assigned boolean not null default false,
   email_offer_completed boolean not null default false,
-  email_ledger_change boolean not null default false,
-  email_request_new boolean not null default false,
-  email_offer_change boolean not null default false,
-  email_midmonth_inactive boolean not null default false,
-  email_endmonth_summary boolean not null default false
+  email_offer_change boolean not null default false
 );
 
 create index family_parents_family_idx on public.family_parents(family_id);
@@ -876,16 +876,16 @@ create or replace function public.rpc_get_my_parent_profile()
 returns table (
   name text,
   phone text,
+  email_midmonth_inactive boolean,
+  email_endmonth_summary boolean,
+  email_ledger_change boolean,
+  email_request_new boolean,
   email_request_offered boolean,
   email_request_unoffered boolean,
   email_request_expired boolean,
   email_offer_assigned boolean,
   email_offer_completed boolean,
-  email_ledger_change boolean,
-  email_request_new boolean,
-  email_offer_change boolean,
-  email_midmonth_inactive boolean,
-  email_endmonth_summary boolean
+  email_offer_change boolean
 )
 language sql
 stable
@@ -895,16 +895,16 @@ as $$
   select
     fp.name,
     fp.phone,
+    fp.email_midmonth_inactive,
+    fp.email_endmonth_summary,
+    fp.email_ledger_change,
+    fp.email_request_new,
     fp.email_request_offered,
     fp.email_request_unoffered,
     fp.email_request_expired,
     fp.email_offer_assigned,
     fp.email_offer_completed,
-    fp.email_ledger_change,
-    fp.email_request_new,
-    fp.email_offer_change,
-    fp.email_midmonth_inactive,
-    fp.email_endmonth_summary
+    fp.email_offer_change
   from public.family_parents fp
   where fp.user_id = auth.uid();
 $$;
@@ -913,16 +913,16 @@ $$;
 create or replace function public.rpc_update_my_parent_profile(
   p_name text default null,
   p_phone text default null,
+  p_email_midmonth_inactive boolean default false,
+  p_email_endmonth_summary boolean default false,
+  p_email_ledger_change boolean default false,
+  p_email_request_new boolean default false,
   p_email_request_offered boolean default false,
   p_email_request_unoffered boolean default false,
   p_email_request_expired boolean default false,
   p_email_offer_assigned boolean default false,
   p_email_offer_completed boolean default false,
-  p_email_ledger_change boolean default false,
-  p_email_request_new boolean default false,
-  p_email_offer_change boolean default false,
-  p_email_midmonth_inactive boolean default false,
-  p_email_endmonth_summary boolean default false
+  p_email_offer_change boolean default false
 )
 returns void
 language plpgsql
@@ -937,16 +937,16 @@ begin
     family_id = v_family_id,
     name = nullif(btrim(p_name), ''),
     phone = nullif(btrim(p_phone), ''),
+    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false),
+    email_endmonth_summary = coalesce(p_email_endmonth_summary, false),
+    email_ledger_change = coalesce(p_email_ledger_change, false),
+    email_request_new = coalesce(p_email_request_new, false),
     email_request_offered = coalesce(p_email_request_offered, false),
     email_request_unoffered = coalesce(p_email_request_unoffered, false),
     email_request_expired = coalesce(p_email_request_expired, false),
     email_offer_assigned = coalesce(p_email_offer_assigned, false),
     email_offer_completed = coalesce(p_email_offer_completed, false),
-    email_ledger_change = coalesce(p_email_ledger_change, false),
-    email_request_new = coalesce(p_email_request_new, false),
-    email_offer_change = coalesce(p_email_offer_change, false),
-    email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false),
-    email_endmonth_summary = coalesce(p_email_endmonth_summary, false)
+    email_offer_change = coalesce(p_email_offer_change, false)
   where user_id = auth.uid();
 
   if not found then
@@ -2190,7 +2190,7 @@ begin
     perform public.rpc_send_email(
       v_rec.email,
       'email_ledger_change',
-      'rpc_create_ledger_entry',
+      'rpc_admin_create_ledger_entry',
       jsonb_build_object(
         'ledger_id', v_entry_id,
         'hours_delta', case when v_rec.family_id = p_from_family_id then -p_hours else p_hours end,
