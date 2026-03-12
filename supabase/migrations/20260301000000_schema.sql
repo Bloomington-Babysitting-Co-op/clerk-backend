@@ -392,7 +392,7 @@ begin
 
   -- Close requests that are past and were assigned
   for v_request in
-    select id, assignee_family_id
+    select id, requester_family_id, assignee_family_id
     from public.requests
     where date < v_today
       and status = 'assigned'
@@ -416,7 +416,8 @@ begin
         'email_offer_completed',
         'rpc_refresh_request_statuses',
         jsonb_build_object(
-          'request_id', v_request.id
+          'request_id', v_request.id,
+          'requester_family_name', public.rpc_family_name(v_request.requester_family_id)
         )
       );
     end loop;
@@ -1364,7 +1365,8 @@ begin
       'email_request_new',
       'rpc_create_request',
       jsonb_build_object(
-        'request_id', v_request_id
+        'request_id', v_request_id,
+        'requester_family_name', public.rpc_family_name(v_family_id)
       )
     );
   end loop;
@@ -1495,7 +1497,8 @@ begin
       'email_offer_change',
       'rpc_update_request',
       jsonb_build_object(
-        'request_id', p_request_id
+        'request_id', p_request_id,
+        'requester_family_name', public.rpc_family_name(v_family_id)
       )
     );
   end loop;
@@ -1539,7 +1542,8 @@ begin
       'email_offer_change',
       'rpc_cancel_request',
       jsonb_build_object(
-        'request_id', p_request_id
+        'request_id', p_request_id,
+        'requester_family_name', public.rpc_family_name(v_family_id)
       )
     );
   end loop;
@@ -1827,7 +1831,8 @@ begin
       'email_offer_assigned',
       'rpc_assign_request',
       jsonb_build_object(
-        'request_id', p_request_id
+        'request_id', p_request_id,
+        'requester_family_name', public.rpc_family_name(v_requester_family_id)
       )
     );
   end loop;
@@ -1893,7 +1898,8 @@ begin
       'email_offer_assigned',
       'rpc_unassign_request',
       jsonb_build_object(
-        'request_id', p_request_id
+        'request_id', p_request_id,
+        'requester_family_name', public.rpc_family_name(v_requester_family_id)
       )
     );
   end loop;
@@ -2113,7 +2119,8 @@ begin
       jsonb_build_object(
         'ledger_id', v_entry_id,
         'hours_delta', case when v_rec.family_id = p_from_family_id then -p_hours else p_hours end,
-        'current_balance', public.rpc_hours_balance_as_of(v_rec.family_id, public.rpc_local_today())
+        'current_balance', public.rpc_hours_balance_as_of(v_rec.family_id, public.rpc_local_today()),
+        'author_email', (select email from auth.users where id = auth.uid())
       )
     );
   end loop;
@@ -2194,7 +2201,8 @@ begin
       jsonb_build_object(
         'ledger_id', v_entry_id,
         'hours_delta', case when v_rec.family_id = p_from_family_id then -p_hours else p_hours end,
-        'current_balance', public.rpc_hours_balance_as_of(v_rec.family_id, public.rpc_local_today())
+        'current_balance', public.rpc_hours_balance_as_of(v_rec.family_id, public.rpc_local_today()),
+        'author_email', (select email from auth.users where id = auth.uid())
       )
     );
   end loop;

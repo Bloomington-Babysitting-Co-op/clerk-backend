@@ -9,7 +9,7 @@ const WEBHOOK_KEY = Deno.env.get('WEBHOOK_KEY')!;
 
 function layout(body: string): string {
   return `
-<div style="font-family: ui-sans-serif, system-ui, sans-serif; max-width: 448px; margin: 0 auto; padding: 24px; background-color: #f9fafb;">
+<div style="font-family: ui-sans-serif, system-ui, sans-serif; max-width: 550px; margin: 0 auto; padding: 24px; background-color: #f9fafb;">
   <div style="background-color: #ffffff; padding: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
     ${body}
     <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0 16px 0;">
@@ -109,8 +109,8 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       subject: 'Your hours balance has changed',
       html: layout(`
         ${heading('Hours balance updated')}
-        ${body(`A ledger entry was recorded: ${formatHours(delta)}.`)}
-        ${body(`Your current balance is: ${formatHours(balance)}.`)}
+        ${body(`A ledger entry was recorded by <strong>${meta.author_email}</strong>: ${formatHours(delta)}`)}
+        ${body(`Your current balance is: ${formatHours(balance)}`)}
         ${btn(ledgerUrl(), 'View ledger')}
         ${muted('Contact a co-op admin if you believe this entry is incorrect.')}
       `),
@@ -122,7 +122,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     subject: 'New request posted',
     html: layout(`
       ${heading('New request available')}
-      ${body('A family has posted a new request.')}
+      ${body(`The <strong>${meta.requester_family_name}</strong> family has posted a new request.`)}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('Log in to view details and submit an offer.')}
     `),
@@ -139,7 +139,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       subject: `Your request has a ${action} offer`,
       html: layout(`
         ${heading('Someone offered to help')}
-        ${body(`<strong>${meta.offer_family_name ?? 'A family'}</strong> has ${action} an offer on your request.`)}
+        ${body(`The <strong>${meta.offer_family_name}</strong> family has ${action} an offer to help on your request.`)}
         ${btn(requestViewUrl(meta.request_id), 'View request')}
         ${muted('Log in to review offers and assign a helper.')}
       `),
@@ -162,23 +162,23 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     subject: 'Your request expired without being assigned',
     html: layout(`
       ${heading('Request expired')}
-      ${body('Your request passed without being assigned to a helper.')}
+      ${body('Your request date passed without being assigned to a helper.')}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('You can submit a new request if you still need help.')}
     `),
   }),
 
-  // Your offer was accepted / unassigned (offer_assigned covers both directions)
+  // Your offer was assigned / unassigned
   email_offer_assigned: (meta) => {
     const action = ({
       rpc_assign_request: 'assigned',
       rpc_unassign_request: 'unassigned'
     } as Record<string,string>)[meta.source] ?? 'changed';
     return {
-      subject: `Your offer has been ${action}`,
+      subject: `Your offer to help has been ${action}`,
       html: layout(`
         ${heading('Your offer status changed')}
-        ${body(`Your offer on a request has been ${action}.`)}
+        ${body(`Your offer to help on a request by the <strong>${meta.requester_family_name}</strong> family has been ${action}.`)}
         ${btn(requestViewUrl(meta.request_id), 'View request')}
         ${muted('Log in to view details.')}
       `),
@@ -190,7 +190,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     subject: 'Request marked as completed',
     html: layout(`
       ${heading('Request completed')}
-      ${body('A request you were assigned to has been marked as completed.')}
+      ${body(`A request by the <strong>${meta.requester_family_name}</strong> family that you were assigned to has been marked as completed.`)}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${btn(ledgerUrl(), 'Submit ledger entry')}
       ${muted('Log in to create a ledger entry and record the hours.')}
@@ -204,10 +204,10 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       rpc_cancel_request: 'cancelled'
     } as Record<string,string>)[meta.source] ?? 'updated or cancelled';
     return {
-      subject: 'A request you offered on has changed',
+      subject: 'A request you offered to help with has changed',
       html: layout(`
         ${heading('Request updated')}
-        ${body(`A request you submitted an offer on has been ${action}.`)}
+        ${body(`A request by the <strong>${meta.requester_family_name}</strong> family that you offer to help with has been ${action}.`)}
         ${btn(requestViewUrl(meta.request_id), 'View request')}
         ${muted('Log in to review the current state of the request.')}
       `),
