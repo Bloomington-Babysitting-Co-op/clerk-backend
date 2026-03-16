@@ -839,7 +839,7 @@ as $$
 $$;
 
 -- RPC: replace all children for the current shared family from JSON array payload
-create or replace function public.rpc_replace_my_family_children(p_children jsonb default '[]'::jsonb)
+create or replace function public.rpc_merge_my_family_children(p_children jsonb default '[]'::jsonb)
 returns void
 language plpgsql
 security definer
@@ -848,27 +848,35 @@ as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
 begin
-  delete from public.family_children
-  where family_id = v_family_id;
-
-  insert into public.family_children (
-    family_id,
-    name,
-    date_of_birth,
-    allergies,
-    notes
+  -- Parse incoming JSON into a CTE and perform a single MERGE
+  with incoming as (
+    select distinct on (lower(btrim(child->>'name')))
+      btrim(child->>'name') as name,
+      lower(btrim(child->>'name')) as name_lower,
+      case
+        when nullif(child->>'date_of_birth', '') is null then null
+        else to_date((child->>'date_of_birth') || '-15', 'YYYY-MM-DD')
+      end as date_of_birth,
+      nullif(btrim(child->>'allergies'), '') as allergies,
+      nullif(btrim(child->>'notes'), '') as notes
+    from jsonb_array_elements(coalesce(p_children, '[]'::jsonb)) as child
+    where btrim(coalesce(child->>'name', '')) <> ''
+    order by lower(btrim(child->>'name'))
   )
-  select
-    v_family_id,
-    btrim(child->>'name') as name,
-    case
-      when nullif(child->>'date_of_birth', '') is null then null
-      else to_date((child->>'date_of_birth') || '-15', 'YYYY-MM-DD')
-    end as date_of_birth,
-    nullif(btrim(child->>'allergies'), '') as allergies,
-    nullif(btrim(child->>'notes'), '') as notes
-  from jsonb_array_elements(coalesce(p_children, '[]'::jsonb)) as child
-  where btrim(coalesce(child->>'name', '')) <> '';
+  merge into public.family_children fc
+  using (select name, name_lower, date_of_birth, allergies, notes from incoming) as src
+    on (fc.family_id = v_family_id and lower(fc.name) = src.name_lower)
+  when matched then
+    update set
+      name = src.name,
+      date_of_birth = src.date_of_birth,
+      allergies = src.allergies,
+      notes = src.notes
+  when not matched then
+    insert (family_id, name, date_of_birth, allergies, notes)
+    values (v_family_id, src.name, src.date_of_birth, src.allergies, src.notes)
+  when not matched by source and fc.family_id = v_family_id then
+    delete;
 end;
 $$;
 
@@ -2561,7 +2569,7 @@ grant execute on function public.rpc_get_my_family_details() to authenticated, s
 grant execute on function public.rpc_update_my_family_details(text, text, jsonb, text, text) to authenticated, service_role;
 grant execute on function public.rpc_update_my_family_photo(text) to authenticated, service_role;
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
-grant execute on function public.rpc_replace_my_family_children(jsonb) to authenticated, service_role;
+grant execute on function public.rpc_merge_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
 grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 
