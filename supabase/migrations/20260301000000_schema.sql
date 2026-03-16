@@ -1365,8 +1365,10 @@ begin
       'email_request_new',
       'rpc_create_request',
       jsonb_build_object(
-        'request_id', v_request_id,
-        'requester_family_name', public.rpc_family_name(v_family_id)
+        -- 'request_id', v_request_id,
+        -- 'requester_family_name', public.rpc_family_name(v_family_id)
+        'request', (select to_jsonb(public.rpc_get_request(v_request_id))),
+        'children', (select coalesce(jsonb_agg(c), '[]'::jsonb) from public.rpc_list_request_children(v_request_id) c)
       )
     );
   end loop;
