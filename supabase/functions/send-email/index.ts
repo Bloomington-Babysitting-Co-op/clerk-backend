@@ -38,10 +38,64 @@ function btn(href: string, label: string): string {
   return `<a href="${href}" style="display: block; background-color: #1d4ed8; color: #ffffff; text-align: center; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-size: 15px; font-weight: 500; margin-bottom: 16px;">${label}</a>`;
 }
 
+function formatDate(d: string | null | undefined): string {
+  if (!d) return '';
+  try {
+    const s = String(d).trim();
+    const isoMatch = s.match(/^\d{4}-\d{2}-\d{2}/);
+    const parsed = isoMatch ? new Date(isoMatch[0]) : new Date(s);
+    if (Number.isNaN(parsed.getTime())) return s;
+    return parsed.toLocaleDateString();
+  } catch (_) {
+    return String(d);
+  }
+}
+
+function formatTime(t: string | null | undefined): string {
+  if (!t) return '';
+  const s = String(t).trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return s;
+  const hhmm = `${m[1].padStart(2, '0')}:${m[2]}`;
+  try {
+    const parsed = new Date(`1970-01-01T${hhmm}:00`);
+    if (Number.isNaN(parsed.getTime())) return hhmm;
+    return parsed.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase();
+  } catch (_) {
+    return hhmm;
+  }
+}
+
 function formatHours(value: number): string {
   const sign = value >= 0 ? '+' : '';
   const color = value >= 0 ? '#16a34a' : '#dc2626';
   return `<strong style="color: ${color};">${sign}${value.toFixed(2)} hours</strong>`;
+}
+
+function formatChildAge(dob: unknown): string {
+  if (!dob) return '';
+  const s = String(dob).trim();
+  const parts = s.split('-');
+  const year = parseInt(parts[0], 10);
+  if (Number.isNaN(year)) return s;
+  const month = parts.length > 1 && parts[1] ? Math.max(0, Math.min(11, parseInt(parts[1], 10) - 1)) : 0;
+  // calculate from the 15th of the month
+  const dobDate = new Date(year, month, 15);
+  if (isNaN(dobDate.getTime())) return s;
+
+  const now = new Date();
+  let years = now.getFullYear() - dobDate.getFullYear();
+  let months = now.getMonth() - dobDate.getMonth();
+  if (now.getDate() < dobDate.getDate()) months -= 1;
+  if (months < 0) {
+    years -= 1;
+    months += 12;
+  }
+
+  if (years < 0) years = 0;
+  if (months < 0) months = 0;
+
+  return `${years}y ${months}m`;
 }
 
 function requestViewUrl(requestId: unknown): string {
@@ -118,6 +172,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
   },
 
   // A new request was posted by any other family
+/*
   email_request_new: (meta) => ({
     subject: 'New request posted',
     html: layout(`
@@ -127,6 +182,108 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       ${muted('Log in to view details and submit an offer.')}
     `),
   }),
+*/
+  email_request_new: (meta) => {
+    const req = (meta.request ?? {}) as Record<string, any>;
+    const children = Array.isArray(meta.children) ? meta.children : [];
+    const family = String(req.requester_family_name ?? '');
+    const type = String(req.type ?? '');
+    const notes = String(req.notes ?? '');
+    const date = formatDate(req.date);
+    const start = formatTime(req.start_time);
+    const end = formatTime(req.end_time);
+    const date_flex = !!req.flexible_date && req.date ? ' (flex)' : '';
+    const time_flex = (!!req.flexible_start_time || !!req.flexible_end_time) && (req.start_time || req.end_time) ? ' (flex)' : '';
+    const hours = req.hours != null ? Number(req.hours) : null;
+    const sit_location = req.sit_location || '';
+    const meal_required = !!req.meal_required;
+    const meal_prepared_by_sitter = !!req.meal_prepared_by_sitter;
+    const sitters_children_welcome = !!req.sitters_children_welcome;
+    const origin = req.origin || '';
+    const destination = req.destination || '';
+
+    const typeSpecificHtml = (type === 'babysit') ? `
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Sit location</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827;">${sit_location}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Meal required</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827;">${meal_required ? 'Yes' : 'No'}</td>
+      </tr>
+      ${meal_required ? `
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Meal prepared by sitter</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827;">${meal_prepared_by_sitter ? 'Yes' : 'No'}</td>
+      </tr>
+      ` : ''}
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Sitter's children welcome</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${sitters_children_welcome ? 'Yes' : 'No'}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6; vertical-align:top;">Children</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; vertical-align:top; border-bottom:1px solid #f3f4f6;">
+          ${children.length > 0 ? children.map((c: any) => `
+            <div style="text-align: left; margin-bottom:8px;">
+              <div style="font-weight:600; color:#111827;">${c.name}</div>
+              <div style="font-size:13px; color:#6b7280;">${formatChildAge(c.date_of_birth)} ${c.allergies ? `· Allergies: ${c.allergies}` : ''} ${c.notes ? `· Notes: ${c.notes}` : ''}</div>
+            </div>
+          `).join('') : 'No children selected'}
+        </td>
+      </tr>
+    ` : ((type === 'drive') ? `
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Origin</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827;">${origin}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Destination</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${destination}</td>
+      </tr>
+    ` : '');
+
+    const hoursRow = (hours !== null && !Number.isNaN(hours)) ? `
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Hours</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827;">${formatHours(hours)}</td>
+      </tr>
+    ` : '';
+
+    const detailsTable = `
+      <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:14px;">
+        <tr>
+          <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Type</td>
+          <td style="padding:6px 8px; text-align: left; font-weight:600; color:#111827; border-bottom:1px solid #f3f4f6;">${type}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Description</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; font-weight:600; border-bottom:1px solid #f3f4f6;">${notes}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Date</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; font-weight:600; border-bottom:1px solid #f3f4f6;">${date || 'No date'}${date_flex}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Time</td>
+          <td style="padding:6px 8px; text-align: left; font-weight:600; color:#111827; border-bottom:1px solid #f3f4f6;">${start || 'TBD'} - ${end || 'TBD'}${time_flex}</td>
+        </tr>
+        ${hoursRow}
+        ${typeSpecificHtml}
+      </table>
+    `;
+
+    return {
+      subject: `New ${type} request from the ${family} family`,
+      html: layout(`
+        ${heading('New request available')}
+        ${body(`The <strong>${family}</strong> family has posted a new ${type} request.`)}
+        ${btn(requestViewUrl(req.id || meta.request_id || ''), 'View request')}
+        ${detailsTable}
+        ${muted('Log in to view current details and submit an offer.')}
+      `),
+    };
+  },
 
   // Someone offered to help with your request
   email_request_offered: (meta) => {
