@@ -216,16 +216,16 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const typeSpecificHtml = (type.toLowerCase() === 'babysit') ? `
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Sit location</td>
-        <td style="padding:6px 8px; text-align: left; color:#111827;">${sit_location}</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${sit_location}</td>
       </tr>
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Meal required</td>
-        <td style="padding:6px 8px; text-align: left; color:#111827;">${meal_required ? 'Yes' : 'No'}</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${meal_required ? 'Yes' : 'No'}</td>
       </tr>
       ${meal_required ? `
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Meal prepared by sitter</td>
-        <td style="padding:6px 8px; text-align: left; color:#111827;">${meal_prepared_by_sitter ? 'Yes' : 'No'}</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${meal_prepared_by_sitter ? 'Yes' : 'No'}</td>
       </tr>
       ` : ''}
       <tr>
@@ -236,9 +236,10 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6; vertical-align:top;">Children</td>
         <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6; vertical-align:top;">
           ${children.length > 0 ? children.map((c: any) => `
-            <div style="text-align: left; margin-bottom:8px;">
-              <div style="font-weight:600; color:#111827;">${c.name}</div>
-              <div style="font-size:13px; color:#6b7280;">${formatChildAge(c.date_of_birth)} ${c.allergies ? `· Allergies: ${c.allergies}` : ''} ${c.notes ? `· Notes: ${c.notes}` : ''}</div>
+            <div style="text-align: left; margin-bottom:8px; border-bottom:1px solid #f3f4f6;">
+              <div">${c.name} (${formatChildAge(c.date_of_birth)})</div>
+              ${c.allergies ? `<div style="font-weight:600;">· Allergies: ${c.allergies}</div>` : ''}
+              ${c.notes ? `<div style="font-style: italic;">· Notes: ${c.notes}</div>` : ''} 
             </div>
           `).join('') : 'No children selected'}
         </td>
@@ -246,7 +247,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     ` : ((type.toLowerCase() === 'drive') ? `
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Origin</td>
-        <td style="padding:6px 8px; text-align: left; color:#111827;">${origin}</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${origin}</td>
       </tr>
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Destination</td>
@@ -257,7 +258,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const hoursRow = (hours !== null && !Number.isNaN(hours)) ? `
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Hours</td>
-        <td style="padding:6px 8px; text-align: left; color:#111827;">${formatHours(hours)}</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${hours}</td>
       </tr>
     ` : '';
 
@@ -265,19 +266,19 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       <table style="width:100%; border-collapse:collapse; margin-bottom:16px; font-size:14px;">
         <tr>
           <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Type</td>
-          <td style="padding:6px 8px; text-align: left; font-weight:600; color:#111827; border-bottom:1px solid #f3f4f6;">${type}</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${type}</td>
         </tr>
         <tr>
           <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Description</td>
-          <td style="padding:6px 8px; text-align: left; color:#111827; font-weight:600; border-bottom:1px solid #f3f4f6;">${notes}</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${notes}</td>
         </tr>
         <tr>
           <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Date</td>
-          <td style="padding:6px 8px; text-align: left; color:#111827; font-weight:600; border-bottom:1px solid #f3f4f6;">${date}${date_flex}</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${date}${date_flex}</td>
         </tr>
         <tr>
           <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Time</td>
-          <td style="padding:6px 8px; text-align: left; font-weight:600; color:#111827; border-bottom:1px solid #f3f4f6;">${start}${type.toLowerCase() === 'drive' ? '' : ' - ' + end}${time_flex}</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${start}${type.toLowerCase() === 'drive' ? '' : ' - ' + end}${time_flex}</td>
         </tr>
         ${hoursRow}
         ${typeSpecificHtml}
