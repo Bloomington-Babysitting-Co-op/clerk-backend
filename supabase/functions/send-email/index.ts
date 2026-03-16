@@ -195,7 +195,18 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const date_flex = !!req.flexible_date && req.date ? ' (flex)' : '';
     const time_flex = (!!req.flexible_start_time || !!req.flexible_end_time) && (req.start_time || req.end_time) ? ' (flex)' : '';
     const hours = req.hours != null ? Number(req.hours) : null;
-    const sit_location = req.sit_location || '';
+    let sit_location = String(req.sit_location ?? '').trim();
+    switch (sit_location) {
+      case 'requester_house':
+        sit_location = "Requester's House";
+        break;
+      case 'sitter_house':
+        sit_location = "Sitter's House";
+        break;
+      case 'either':
+        sit_location = 'Either';
+        break;
+    }
     const meal_required = !!req.meal_required;
     const meal_prepared_by_sitter = !!req.meal_prepared_by_sitter;
     const sitters_children_welcome = !!req.sitters_children_welcome;
@@ -223,7 +234,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       </tr>
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6; vertical-align:top;">Children</td>
-        <td style="padding:6px 8px; text-align: left; color:#111827; vertical-align:top; border-bottom:1px solid #f3f4f6;">
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6; vertical-align:top;">
           ${children.length > 0 ? children.map((c: any) => `
             <div style="text-align: left; margin-bottom:8px;">
               <div style="font-weight:600; color:#111827;">${c.name}</div>
@@ -277,9 +288,9 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       subject: `New ${type} request from the ${family} family`,
       html: layout(`
         ${heading('New request available')}
-        ${body(`The <strong>${family}</strong> family has posted a new ${type} request.`)}
-        ${btn(requestViewUrl(req.id || meta.request_id || ''), 'View request')}
+        ${body(`The <strong>${family}</strong> family has posted a new request.`)}
         ${detailsTable}
+        ${btn(requestViewUrl(req.id || meta.request_id || ''), 'View request')}
         ${muted('Log in to view current details and submit an offer.')}
       `),
     };
