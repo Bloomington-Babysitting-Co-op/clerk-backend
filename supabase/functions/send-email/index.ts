@@ -52,7 +52,7 @@ function formatDate(d: string | null | undefined): string {
 }
 
 function formatTime(t: string | null | undefined): string {
-  if (!t) return '';
+  if (!t) return 'TBD';
   const s = String(t).trim();
   const m = s.match(/^(\d{1,2}):(\d{2})/);
   if (!m) return s;
@@ -187,7 +187,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const req = (meta.request ?? {}) as Record<string, any>;
     const children = Array.isArray(meta.children) ? meta.children : [];
     const family = String(req.requester_family_name ?? '');
-    const type = String(req.type ?? '');
+    const type = String(req.type ?? '').replace(/^./, (c) => c.toUpperCase());
     const notes = String(req.notes ?? '');
     const date = formatDate(req.date);
     const start = formatTime(req.start_time);
@@ -202,7 +202,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const origin = req.origin || '';
     const destination = req.destination || '';
 
-    const typeSpecificHtml = (type === 'babysit') ? `
+    const typeSpecificHtml = (type.toLowerCase() === 'babysit') ? `
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Sit location</td>
         <td style="padding:6px 8px; text-align: left; color:#111827;">${sit_location}</td>
@@ -232,7 +232,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
           `).join('') : 'No children selected'}
         </td>
       </tr>
-    ` : ((type === 'drive') ? `
+    ` : ((type.toLowerCase() === 'drive') ? `
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Origin</td>
         <td style="padding:6px 8px; text-align: left; color:#111827;">${origin}</td>
@@ -262,11 +262,11 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
         </tr>
         <tr>
           <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Date</td>
-          <td style="padding:6px 8px; text-align: left; color:#111827; font-weight:600; border-bottom:1px solid #f3f4f6;">${date || 'No date'}${date_flex}</td>
+          <td style="padding:6px 8px; text-align: left; color:#111827; font-weight:600; border-bottom:1px solid #f3f4f6;">${date}${date_flex}</td>
         </tr>
         <tr>
           <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Time</td>
-          <td style="padding:6px 8px; text-align: left; font-weight:600; color:#111827; border-bottom:1px solid #f3f4f6;">${start || 'TBD'} - ${end || 'TBD'}${time_flex}</td>
+          <td style="padding:6px 8px; text-align: left; font-weight:600; color:#111827; border-bottom:1px solid #f3f4f6;">${start}${type.toLowerCase() === 'drive' ? '' : ' - ' + end}${time_flex}</td>
         </tr>
         ${hoursRow}
         ${typeSpecificHtml}
