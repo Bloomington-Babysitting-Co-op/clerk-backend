@@ -30,12 +30,12 @@ function body(text: string): string {
   return `<p style="font-size: 15px; color: #374151; margin: 0 0 16px 0; line-height: 1.6;">${text}</p>`;
 }
 
-function muted(text: string): string {
-  return `<p style="font-size: 13px; color: #6b7280; margin: 0; line-height: 1.5;">${text}</p>`;
-}
-
 function btn(href: string, label: string): string {
   return `<a href="${href}" style="display: block; background-color: #1d4ed8; color: #ffffff; text-align: center; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-size: 15px; font-weight: 500; margin-bottom: 16px;">${label}</a>`;
+}
+
+function muted(text: string): string {
+  return `<p style="font-size: 13px; color: #6b7280; margin: 0; line-height: 1.5;">${text}</p>`;
 }
 
 function formatDate(d: string | null | undefined): string {
@@ -108,6 +108,10 @@ function requestListUrl(): string {
 
 function ledgerUrl(): string {
   return `${FRONTEND_URL}/ledger`;
+}
+
+function entryUrl(): string {
+  return `${FRONTEND_URL}/entry-new`;
 }
 
 // ─── Template map ─────────────────────────────────────────────────────────────
@@ -361,7 +365,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       ${heading('Request completed')}
       ${body(`A request by the <strong>${meta.requester_family_name}</strong> family that you were assigned to has been marked as completed.`)}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
-      ${btn(ledgerUrl(), 'Submit ledger entry')}
+      ${btn(entryUrl(), 'Submit ledger entry')}
       ${muted('Log in to create a ledger entry and record the hours.')}
     `),
   }),
