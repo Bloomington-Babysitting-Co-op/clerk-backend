@@ -241,9 +241,9 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
         <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6; vertical-align:top;">
           ${children.length > 0 ? children.map((c: any) => `
             <div style="text-align: left; margin-bottom:8px; border-bottom:1px solid #f3f4f6;">
-              <div">${c.name} (${formatChildAge(c.date_of_birth)})</div>
-              ${c.allergies ? `<div style="font-weight:600;">· Allergies: ${c.allergies}</div>` : ''}
-              ${c.notes ? `<div style="font-style: italic;">· Notes: ${c.notes}</div>` : ''} 
+              <div>${c.name} (${formatChildAge(c.date_of_birth)})</div>
+              ${c.allergies ? `<div style="font-weight:600;">Allergies: ${c.allergies}</div>` : ''}
+              ${c.notes ? `<div style="font-style: italic;">Notes: ${c.notes}</div>` : ''} 
             </div>
           `).join('') : 'No children selected'}
         </td>
