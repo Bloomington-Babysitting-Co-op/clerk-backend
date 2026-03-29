@@ -92,6 +92,7 @@ create table public.requests (
   meal_required boolean not null default false,
   meal_prepared_by_sitter boolean not null default false,
   sitters_children_welcome boolean not null default false,
+  pets_are_present boolean not null default false,
   origin text,
   destination text,
   assignee_family_id uuid references public.families(id),
@@ -119,6 +120,9 @@ create table public.requests (
   ),
   constraint requests_meal_prepared_requires_meal_check check (
     not meal_prepared_by_sitter or meal_required
+  ),
+  constraint requests_pets_require_sitters_children_check check (
+    not pets_are_present or sitters_children_welcome
   )
 );
 
@@ -1130,6 +1134,7 @@ returns table (
   meal_required boolean,
   meal_prepared_by_sitter boolean,
   sitters_children_welcome boolean,
+  pets_are_present boolean,
   origin text,
   destination text,
   assignee_family_id uuid,
@@ -1161,6 +1166,7 @@ begin
     r.meal_required,
     r.meal_prepared_by_sitter,
     r.sitters_children_welcome,
+    r.pets_are_present,
     r.origin,
     r.destination,
     r.assignee_family_id,
@@ -1250,6 +1256,7 @@ create or replace function public.rpc_create_request(
   p_meal_required boolean default false,
   p_meal_prepared_by_sitter boolean default false,
   p_sitters_children_welcome boolean default false,
+  p_pets_are_present boolean default false,
   p_child_ids uuid[] default null,
   p_origin text default null,
   p_destination text default null
@@ -1291,6 +1298,10 @@ begin
     raise exception 'Meal cannot be prepared by sitter unless meal is required';
   end if;
 
+  if p_pets_are_present and not p_sitters_children_welcome then
+    raise exception 'Pet presence is irrelevant unless sitter children are welcome';
+  end if;
+
   if p_type = 'babysit' and p_start_time is not null and p_end_time is not null then
     v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
   end if;
@@ -1314,6 +1325,7 @@ begin
     meal_required,
     meal_prepared_by_sitter,
     sitters_children_welcome,
+    pets_are_present,
     origin,
     destination,
     status
@@ -1333,6 +1345,7 @@ begin
     coalesce(p_meal_required, false),
     coalesce(p_meal_prepared_by_sitter, false),
     coalesce(p_sitters_children_welcome, false),
+    coalesce(p_pets_are_present, false),
     case when p_type = 'drive' then p_origin else null end,
     case when p_type = 'drive' then p_destination else null end,
     'open'
@@ -1367,6 +1380,8 @@ begin
     where fp.family_id <> v_family_id
       and fp.email_request_new = true
       and f.is_active = true
+    union all
+    select 'bloomingtonbabysittingco-op@googlegroups.com'::text as email
   loop
     perform public.rpc_send_email(
       v_rec.email,
@@ -1398,6 +1413,7 @@ create or replace function public.rpc_update_request(
   p_meal_required boolean default false,
   p_meal_prepared_by_sitter boolean default false,
   p_sitters_children_welcome boolean default false,
+  p_pets_are_present boolean default false,
   p_child_ids uuid[] default null,
   p_origin text default null,
   p_destination text default null
@@ -1445,6 +1461,10 @@ begin
     raise exception 'Meal cannot be prepared by sitter unless meal is required';
   end if;
 
+  if p_pets_are_present and not p_sitters_children_welcome then
+    raise exception 'Pet presence is irrelevant unless sitter children are welcome';
+  end if;
+
   if v_request_type = 'babysit' and p_start_time is not null and p_end_time is not null then
     v_hours := ceil(extract(epoch from (p_end_time - p_start_time)) / 900.0) * 0.25;
   end if;
@@ -1466,6 +1486,7 @@ begin
       meal_required = case when v_request_type = 'babysit' then coalesce(p_meal_required, false) else false end,
       meal_prepared_by_sitter = case when v_request_type = 'babysit' then coalesce(p_meal_prepared_by_sitter, false) else false end,
       sitters_children_welcome = case when v_request_type = 'babysit' then coalesce(p_sitters_children_welcome, false) else false end,
+      pets_are_present = case when v_request_type = 'babysit' then coalesce(p_pets_are_present, false) else false end,
       origin = case when v_request_type = 'drive' then p_origin else null end,
       destination = case when v_request_type = 'drive' then p_destination else null end
   where id = p_request_id;
