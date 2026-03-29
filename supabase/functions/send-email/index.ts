@@ -214,6 +214,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const meal_required = !!req.meal_required;
     const meal_prepared_by_sitter = !!req.meal_prepared_by_sitter;
     const sitters_children_welcome = !!req.sitters_children_welcome;
+    const pets_are_present = !!req.pets_are_present;
     const origin = req.origin || '';
     const destination = req.destination || '';
 
@@ -236,6 +237,12 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Sitter's children welcome</td>
         <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${sitters_children_welcome ? 'Yes' : 'No'}</td>
       </tr>
+      ${sitters_children_welcome ? `
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Pets are present</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${pets_are_present ? 'Yes' : 'No'}</td>
+      </tr>
+      ` : ''}
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6; vertical-align:top;">Children</td>
         <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6; vertical-align:top;">
