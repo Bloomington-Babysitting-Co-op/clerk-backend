@@ -50,13 +50,16 @@ create table public.family_parents (
   email_endmonth_summary boolean not null default false,
   email_midmonth_inactive boolean not null default false,
   email_ledger_change boolean not null default false,
-  email_request_new boolean not null default false,
-  email_request_offered boolean not null default false,
-  email_request_unoffered boolean not null default false,
-  email_request_expired boolean not null default false,
-  email_offer_assigned boolean not null default false,
-  email_offer_completed boolean not null default false,
-  email_offer_change boolean not null default false
+  email_other_request_new boolean not null default false,
+  email_other_request_unoffered boolean not null default false,
+  email_other_request_expiring boolean not null default false,
+  email_my_request_offered boolean not null default false,
+  email_my_request_unoffered boolean not null default false,
+  email_my_request_expiring boolean not null default false,
+  email_my_request_expired boolean not null default false,
+  email_my_offer_assigned boolean not null default false,
+  email_my_offer_change boolean not null default false,
+  email_my_offer_completed boolean not null default false
 );
 
 create index family_parents_family_idx on public.family_parents(family_id);
@@ -373,19 +376,19 @@ begin
     set status = 'expired'
     where id = v_request.id;
 
-    -- Notify users who opted into email_offer_completed
+    -- Notify users who opted into email_my_request_expired
     for v_rec in
       select u.email
       from auth.users u
       join public.family_parents fp on fp.user_id = u.id
       join public.families f on f.id = fp.family_id
       where fp.family_id = v_request.requester_family_id
-        and fp.email_request_expired = true
+        and fp.email_my_request_expired = true
         and f.is_active = true
     loop
       perform public.rpc_send_email(
         v_rec.email,
-        'email_request_expired',
+        'email_my_request_expired',
         'rpc_refresh_request_statuses',
         jsonb_build_object(
           'request_id', v_request.id
@@ -405,19 +408,19 @@ begin
     set status = 'completed'
     where id = v_request.id;
 
-    -- Notify users who opted into email_offer_completed
+    -- Notify users who opted into email_my_offer_completed
     for v_rec in
       select u.email
       from auth.users u
       join public.family_parents fp on fp.user_id = u.id
       join public.families f on f.id = fp.family_id
       where fp.family_id = v_request.assignee_family_id
-        and fp.email_offer_completed = true
+        and fp.email_my_offer_completed = true
         and f.is_active = true
     loop
       perform public.rpc_send_email(
         v_rec.email,
-        'email_offer_completed',
+        'email_my_offer_completed',
         'rpc_refresh_request_statuses',
         jsonb_build_object(
           'request_id', v_request.id,
@@ -892,13 +895,16 @@ returns table (
   email_endmonth_summary boolean,
   email_midmonth_inactive boolean,
   email_ledger_change boolean,
-  email_request_new boolean,
-  email_request_offered boolean,
-  email_request_unoffered boolean,
-  email_request_expired boolean,
-  email_offer_assigned boolean,
-  email_offer_completed boolean,
-  email_offer_change boolean
+  email_other_request_new boolean,
+  email_other_request_unoffered boolean,
+  email_other_request_expiring boolean,
+  email_my_request_offered boolean,
+  email_my_request_unoffered boolean,
+  email_my_request_expiring boolean,
+  email_my_request_expired boolean,
+  email_my_offer_assigned boolean,
+  email_my_offer_change boolean,
+  email_my_offer_completed boolean
 )
 language sql
 stable
@@ -911,13 +917,16 @@ as $$
     fp.email_endmonth_summary,
     fp.email_midmonth_inactive,
     fp.email_ledger_change,
-    fp.email_request_new,
-    fp.email_request_offered,
-    fp.email_request_unoffered,
-    fp.email_request_expired,
-    fp.email_offer_assigned,
-    fp.email_offer_completed,
-    fp.email_offer_change
+    fp.email_other_request_new,
+    fp.email_other_request_unoffered,
+    fp.email_other_request_expiring,
+    fp.email_my_request_offered,
+    fp.email_my_request_unoffered,
+    fp.email_my_request_expiring,
+    fp.email_my_request_expired,
+    fp.email_my_offer_assigned,
+    fp.email_my_offer_change,
+    fp.email_my_offer_completed
   from public.family_parents fp
   where fp.user_id = auth.uid();
 $$;
@@ -929,13 +938,16 @@ create or replace function public.rpc_update_my_parent_profile(
   p_email_endmonth_summary boolean default false,
   p_email_midmonth_inactive boolean default false,
   p_email_ledger_change boolean default false,
-  p_email_request_new boolean default false,
-  p_email_request_offered boolean default false,
-  p_email_request_unoffered boolean default false,
-  p_email_request_expired boolean default false,
-  p_email_offer_assigned boolean default false,
-  p_email_offer_completed boolean default false,
-  p_email_offer_change boolean default false
+  p_email_other_request_new boolean default false,
+  p_email_other_request_unoffered boolean default false,
+  p_email_other_request_expiring boolean default false,
+  p_email_my_request_offered boolean default false,
+  p_email_my_request_unoffered boolean default false,
+  p_email_my_request_expiring boolean default false,
+  p_email_my_request_expired boolean default false,
+  p_email_my_offer_assigned boolean default false,
+  p_email_my_offer_change boolean default false,
+  p_email_my_offer_completed boolean default false
 )
 returns void
 language plpgsql
@@ -953,13 +965,16 @@ begin
     email_endmonth_summary = coalesce(p_email_endmonth_summary, false),
     email_midmonth_inactive = coalesce(p_email_midmonth_inactive, false),
     email_ledger_change = coalesce(p_email_ledger_change, false),
-    email_request_new = coalesce(p_email_request_new, false),
-    email_request_offered = coalesce(p_email_request_offered, false),
-    email_request_unoffered = coalesce(p_email_request_unoffered, false),
-    email_request_expired = coalesce(p_email_request_expired, false),
-    email_offer_assigned = coalesce(p_email_offer_assigned, false),
-    email_offer_completed = coalesce(p_email_offer_completed, false),
-    email_offer_change = coalesce(p_email_offer_change, false)
+    email_other_request_new = coalesce(p_email_other_request_new, false),
+    email_other_request_unoffered = coalesce(p_email_other_request_unoffered, false),
+    email_other_request_expiring = coalesce(p_email_other_request_expiring, false),
+    email_my_request_offered = coalesce(p_email_my_request_offered, false),
+    email_my_request_unoffered = coalesce(p_email_my_request_unoffered, false),
+    email_my_request_expiring = coalesce(p_email_my_request_expiring, false),
+    email_my_request_expired = coalesce(p_email_my_request_expired, false),
+    email_my_offer_assigned = coalesce(p_email_my_offer_assigned, false),
+    email_my_offer_change = coalesce(p_email_my_offer_change, false),
+    email_my_offer_completed = coalesce(p_email_my_offer_completed, false)
   where user_id = auth.uid();
 
   if not found then
@@ -1371,21 +1386,21 @@ begin
     ) as c;
   end if;
 
-  -- Notify users who opted into email_request_new
+  -- Notify users who opted into email_other_request_new
   for v_rec in
     select u.email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id <> v_family_id
-      and fp.email_request_new = true
+      and fp.email_other_request_new = true
       and f.is_active = true
     union all
     select 'bloomingtonbabysittingco-op@googlegroups.com'::text as email
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_request_new',
+      'email_other_request_new',
       'rpc_create_request',
       jsonb_build_object(
         -- 'request_id', v_request_id,
@@ -1513,19 +1528,19 @@ begin
     ) as c;
   end if;
 
-  -- Notify users who opted into email_offer_change
+  -- Notify users who opted into email_my_offer_change
   for v_rec in
     select distinct u.email as email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id in (select family_id from public.offers where request_id = p_request_id)
-      and fp.email_offer_change = true
+      and fp.email_my_offer_change = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_offer_change',
+      'email_my_offer_change',
       'rpc_update_request',
       jsonb_build_object(
         'request_id', p_request_id,
@@ -1558,19 +1573,19 @@ begin
     raise exception 'Request not found or cannot be cancelled';
   end if;
 
-  -- Notify users who opted into email_offer_change
+  -- Notify users who opted into email_my_offer_change
   for v_rec in
     select distinct u.email as email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id in (select family_id from public.offers where request_id = p_request_id)
-      and fp.email_offer_change = true
+      and fp.email_my_offer_change = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_offer_change',
+      'email_my_offer_change',
       'rpc_cancel_request',
       jsonb_build_object(
         'request_id', p_request_id,
@@ -1625,19 +1640,19 @@ begin
   where id = p_request_id
     and status = 'open';
 
-  -- Notify users who opted into email_request_offered
+  -- Notify users who opted into email_my_request_offered
   for v_rec in
     select u.email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id = v_requester_family_id
-      and fp.email_request_offered = true
+      and fp.email_my_request_offered = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_request_offered',
+      'email_my_request_offered',
       'rpc_create_offer',
       jsonb_build_object(
         'request_id', p_request_id,
@@ -1692,19 +1707,19 @@ begin
   set notes = p_notes
   where id = p_offer_id;
 
-  -- Notify users who opted into email_request_offered
+  -- Notify users who opted into email_my_request_offered
   for v_rec in
     select u.email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id = v_requester_family_id
-      and fp.email_request_offered = true
+      and fp.email_my_request_offered = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_request_offered',
+      'email_my_request_offered',
       'rpc_update_offer',
       jsonb_build_object(
         'request_id', v_offer_request_id,
@@ -1774,19 +1789,19 @@ begin
       where id = v_offer_request_id;
   end if;
 
-  -- Notify users who opted into email_request_offered
+  -- Notify users who opted into email_my_request_offered
   for v_rec in
     select u.email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id = v_requester_family_id
-      and fp.email_request_offered = true
+      and fp.email_my_request_offered = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_request_offered',
+      'email_my_request_offered',
       'rpc_cancel_offer',
       jsonb_build_object(
         'request_id', v_offer_request_id,
@@ -1847,19 +1862,19 @@ begin
       assignee_family_id = v_offer_family_id
   where id = p_request_id;
 
-  -- Notify users who opted into email_offer_assigned
+  -- Notify users who opted into email_my_offer_assigned
   for v_rec in
     select u.email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id = v_offer_family_id
-      and fp.email_offer_assigned = true
+      and fp.email_my_offer_assigned = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_offer_assigned',
+      'email_my_offer_assigned',
       'rpc_assign_request',
       jsonb_build_object(
         'request_id', p_request_id,
@@ -1914,19 +1929,19 @@ begin
   where id = p_request_id
     and status = 'assigned';
 
-  -- Notify users who opted into email_offer_assigned
+  -- Notify users who opted into email_my_offer_assigned
   for v_rec in
     select u.email
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     where fp.family_id = v_assignee_family_id
-      and fp.email_offer_assigned = true
+      and fp.email_my_offer_assigned = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_offer_assigned',
+      'email_my_offer_assigned',
       'rpc_unassign_request',
       jsonb_build_object(
         'request_id', p_request_id,
@@ -2645,7 +2660,77 @@ declare
 begin
   perform public.rpc_refresh_request_statuses();
 
-  -- Notify users who opted into email_request_unoffered
+  -- Notify users who opted into email_other_request_unoffered
+  for v_rec in
+    select u.email, r.id, r.requester_family_id
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    join public.requests r on r.requester_family_id <> fp.family_id
+      and not exists (select 1 from public.offers o where o.request_id = r.id and o.family_id = fp.family_id)
+    where r.status = 'open'
+      and (r.created_at at time zone 'America/Chicago')::date = (v_today - interval '3 days')::date
+      and fp.email_other_request_unoffered = true
+      and f.is_active = true
+  loop
+    perform public.rpc_send_email(
+      v_rec.email,
+      'email_other_request_unoffered',
+      'cron_refresh_request_statuses',
+      jsonb_build_object(
+        'request_id', v_rec.id,
+        'requester_family_name', public.rpc_family_name(v_rec.requester_family_id)
+      )
+    );
+  end loop;
+
+  -- Notify users who opted into email_other_request_expiring
+  for v_rec in
+    select u.email, r.id, r.requester_family_id
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    join public.requests r on r.requester_family_id <> fp.family_id
+      and not exists (select 1 from public.offers o where o.request_id = r.id and o.family_id = fp.family_id)
+    where r.status in ('open','offered')
+      and r.date = (v_today + interval '2 days')::date
+      and fp.email_other_request_expiring = true
+      and f.is_active = true
+  loop
+    perform public.rpc_send_email(
+      v_rec.email,
+      'email_other_request_expiring',
+      'cron_refresh_request_statuses',
+      jsonb_build_object(
+        'request_id', v_rec.id,
+        'requester_family_name', public.rpc_family_name(v_rec.requester_family_id)
+      )
+    );
+  end loop;
+
+  -- Notify users who opted into email_my_request_unoffered
+  for v_rec in
+    select u.email, r.id
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    join public.requests r on r.requester_family_id = fp.family_id
+    where r.status = 'open'
+      and (r.created_at at time zone 'America/Chicago')::date = (v_today - interval '3 days')::date
+      and fp.email_my_request_unoffered = true
+      and f.is_active = true
+  loop
+    perform public.rpc_send_email(
+      v_rec.email,
+      'email_my_request_unoffered',
+      'cron_refresh_request_statuses',
+      jsonb_build_object(
+        'request_id', v_rec.id
+      )
+    );
+  end loop;
+
+  -- Notify users who opted into email_my_request_expiring
   for v_rec in
     select u.email, r.id
     from auth.users u
@@ -2654,12 +2739,12 @@ begin
     join public.requests r on r.requester_family_id = fp.family_id
     where r.status in ('open','offered')
       and r.date = (v_today + interval '2 days')::date
-      and fp.email_request_unoffered = true
+      and fp.email_my_request_expiring = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
-      'email_request_unoffered',
+      'email_my_request_expiring',
       'cron_refresh_request_statuses',
       jsonb_build_object(
         'request_id', v_rec.id
