@@ -175,19 +175,8 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     };
   },
 
-  // A new request was posted by any other family
-/*
-  email_request_new: (meta) => ({
-    subject: 'New request posted',
-    html: layout(`
-      ${heading('New request available')}
-      ${body(`The <strong>${meta.requester_family_name}</strong> family has posted a new request.`)}
-      ${btn(requestViewUrl(meta.request_id), 'View request')}
-      ${muted('Log in to view details and submit an offer.')}
-    `),
-  }),
-*/
-  email_request_new: (meta) => {
+  // Another family's request has been created
+  email_other_request_new: (meta) => {
     const req = (meta.request ?? {}) as Record<string, any>;
     const children = Array.isArray(meta.children) ? meta.children : [];
     const family = String(req.requester_family_name ?? '');
@@ -308,8 +297,30 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     };
   },
 
-  // Someone offered to help with your request
-  email_request_offered: (meta) => {
+  // Another family's request has been open for 3 days with no offer
+  email_other_request_unoffered: (meta) => ({
+    subject: `${meta.requester_family_name}'s request has no offers yet`,
+    html: layout(`
+      ${heading('No offers yet')}
+      ${body(`${meta.requester_family_name}'s upcoming request has been open for 3 days without receiving any offers.`)}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
+      ${muted('Consider offering your help.')}
+    `),
+  }),
+
+  // Another family's request will expire in 2 days
+  email_other_request_expiring: (meta) => ({
+    subject: `${meta.requester_family_name}'s request will expire in 2 days`,
+    html: layout(`
+      ${heading('No offers yet')}
+      ${body(`${meta.requester_family_name}'s upcoming request has not been assigned and is 2 days away.`)}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
+      ${muted('Consider offering your help.')}
+    `),
+  }),
+
+  // Your family's request has an offer to help
+  email_my_request_offered: (meta) => {
     const action = ({
       rpc_create_offer: 'submitted',
       rpc_update_offer: 'updated',
@@ -326,19 +337,30 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     };
   },
 
-  // Your request was never assigned and is approaching expiry (2 days out)
-  email_request_unoffered: (meta) => ({
+  // Your family's request has been open for 3 days with no offer
+  email_my_request_unoffered: (meta) => ({
     subject: 'Your request has no offers yet',
     html: layout(`
       ${heading('No offers yet')}
-      ${body('Your upcoming request has not received any offers and is 2 days away.')}
+      ${body('Your upcoming request has been open for 3 days without receiving any offers.')}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('Consider reaching out to co-op members directly if you need coverage.')}
     `),
   }),
 
-  // Your request expired without being assigned
-  email_request_expired: (meta) => ({
+  // Your family's request will expire in 2 days
+  email_my_request_expiring: (meta) => ({
+    subject: 'Your request will expire in 2 days',
+    html: layout(`
+      ${heading('No offers yet')}
+      ${body('Your upcoming request has not been assigned and is 2 days away.')}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
+      ${muted('Consider reaching out to co-op members directly if you need coverage.')}
+    `),
+  }),
+
+  // Your family's request has expired
+  email_my_request_expired: (meta) => ({
     subject: 'Your request expired without being assigned',
     html: layout(`
       ${heading('Request expired')}
@@ -349,7 +371,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
   }),
 
   // Your offer was assigned / unassigned
-  email_offer_assigned: (meta) => {
+  email_my_offer_assigned: (meta) => {
     const action = ({
       rpc_assign_request: 'assigned',
       rpc_unassign_request: 'unassigned'
@@ -365,20 +387,8 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     };
   },
 
-  // A request you were assigned to has been completed
-  email_offer_completed: (meta) => ({
-    subject: 'Request marked as completed',
-    html: layout(`
-      ${heading('Request completed')}
-      ${body(`A request by the <strong>${meta.requester_family_name}</strong> family that you were assigned to has been marked as completed.`)}
-      ${btn(requestViewUrl(meta.request_id), 'View request')}
-      ${btn(entryUrl(), 'Submit ledger entry')}
-      ${muted('Log in to create a ledger entry and record the hours.')}
-    `),
-  }),
-
   // A request you offered on was updated or cancelled
-  email_offer_change: (meta) => {
+  email_my_offer_change: (meta) => {
     const action = ({
       rpc_update_request: 'updated',
       rpc_cancel_request: 'cancelled'
@@ -393,6 +403,18 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       `),
     };
   },
+
+  // A request you were assigned to has been completed
+  email_my_offer_completed: (meta) => ({
+    subject: 'Request marked as completed',
+    html: layout(`
+      ${heading('Request completed')}
+      ${body(`A request by the <strong>${meta.requester_family_name}</strong> family that you were assigned to has been marked as completed.`)}
+      ${btn(requestViewUrl(meta.request_id), 'View request')}
+      ${btn(entryUrl(), 'Submit ledger entry')}
+      ${muted('Log in to create a ledger entry and record the hours.')}
+    `),
+  }),
 };
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
