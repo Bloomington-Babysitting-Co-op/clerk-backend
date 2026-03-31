@@ -71,6 +71,7 @@ create table public.family_children (
   name text not null,
   date_of_birth date not null,
   allergies text,
+  car_seat text,
   notes text
 );
 
@@ -98,6 +99,7 @@ create table public.requests (
   pets_are_present boolean not null default false,
   origin text,
   destination text,
+  adult_count integer not null default 0,
   assignee_family_id uuid references public.families(id),
   created_at timestamptz default now(),
   created_by uuid not null default auth.uid() references auth.users(id),
@@ -821,6 +823,7 @@ returns table (
   name text,
   date_of_birth date,
   allergies text,
+  car_seat text,
   notes text
 )
 language sql
@@ -836,6 +839,7 @@ as $$
     fc.name,
     fc.date_of_birth,
     fc.allergies,
+    fc.car_seat,
     fc.notes
   from public.family_children fc
   cross join me
@@ -865,23 +869,25 @@ begin
         else to_date((child->>'date_of_birth') || '-15', 'YYYY-MM-DD')
       end as date_of_birth,
       nullif(btrim(child->>'allergies'), '') as allergies,
+      nullif(btrim(child->>'car_seat'), '') as car_seat,
       nullif(btrim(child->>'notes'), '') as notes
     from jsonb_array_elements(coalesce(p_children, '[]'::jsonb)) as child
     where btrim(coalesce(child->>'name', '')) <> ''
     order by lower(btrim(child->>'name'))
   )
   merge into public.family_children fc
-  using (select name, name_lower, date_of_birth, allergies, notes from incoming) as src
+  using (select name, name_lower, date_of_birth, allergies, car_seat, notes from incoming) as src
     on (fc.family_id = v_family_id and lower(fc.name) = src.name_lower)
   when matched then
     update set
       name = src.name,
       date_of_birth = src.date_of_birth,
       allergies = src.allergies,
+      car_seat = src.car_seat,
       notes = src.notes
   when not matched then
-    insert (family_id, name, date_of_birth, allergies, notes)
-    values (v_family_id, src.name, src.date_of_birth, src.allergies, src.notes)
+    insert (family_id, name, date_of_birth, allergies, car_seat, notes)
+    values (v_family_id, src.name, src.date_of_birth, src.allergies, src.car_seat, src.notes)
   when not matched by source and fc.family_id = v_family_id then
     delete;
 end;
@@ -1050,6 +1056,7 @@ as $$
           'name', fc.name,
           'date_of_birth', fc.date_of_birth,
           'allergies', fc.allergies,
+          'car_seat', fc.car_seat,
           'notes', fc.notes
         )
         order by fc.date_of_birth, fc.name
@@ -1152,6 +1159,7 @@ returns table (
   pets_are_present boolean,
   origin text,
   destination text,
+  adult_count integer,
   assignee_family_id uuid,
   created_at timestamptz
 )
@@ -1184,6 +1192,7 @@ begin
     r.pets_are_present,
     r.origin,
     r.destination,
+    r.adult_count,
     r.assignee_family_id,
     r.created_at
   from public.requests r
@@ -1199,6 +1208,7 @@ returns table (
   name text,
   date_of_birth date,
   allergies text,
+  car_seat text,
   notes text
 )
 language sql
@@ -1211,6 +1221,7 @@ as $$
     fc.name,
     fc.date_of_birth,
     fc.allergies,
+    fc.car_seat,
     fc.notes
   from public.request_children rc
   join public.family_children fc on fc.id = rc.child_id
@@ -1274,7 +1285,8 @@ create or replace function public.rpc_create_request(
   p_pets_are_present boolean default false,
   p_child_ids uuid[] default null,
   p_origin text default null,
-  p_destination text default null
+  p_destination text default null,
+  p_adult_count integer default 0
 )
 returns void
 language plpgsql
@@ -1343,6 +1355,7 @@ begin
     pets_are_present,
     origin,
     destination,
+    adult_count,
     status
   )
   values (
@@ -1356,18 +1369,19 @@ begin
     coalesce(p_flexible_start_time, false),
     coalesce(p_flexible_end_time, false),
     v_hours,
-    p_sit_location,
-    coalesce(p_meal_required, false),
-    coalesce(p_meal_prepared_by_sitter, false),
-    coalesce(p_sitters_children_welcome, false),
-    coalesce(p_pets_are_present, false),
+    case when p_type = 'babysit' then p_sit_location else null end,
+    case when p_type = 'babysit' then coalesce(p_meal_required, false) else false end,
+    case when p_type = 'babysit' then coalesce(p_meal_prepared_by_sitter, false) else false end,
+    case when p_type = 'babysit' then coalesce(p_sitters_children_welcome, false) else false end,
+    case when p_type = 'babysit' then coalesce(p_pets_are_present, false) else false end,
     case when p_type = 'drive' then p_origin else null end,
     case when p_type = 'drive' then p_destination else null end,
+    case when p_type = 'drive' then coalesce(p_adult_count, 0) else 0 end,
     'open'
   )
   returning id into v_request_id;
 
-  if p_type = 'babysit' and coalesce(array_length(p_child_ids, 1), 0) > 0 then
+  if p_type in ('babysit', 'drive') and coalesce(array_length(p_child_ids, 1), 0) > 0 then
     if exists (
       select 1
       from unnest(p_child_ids) as child_id
@@ -1431,7 +1445,8 @@ create or replace function public.rpc_update_request(
   p_pets_are_present boolean default false,
   p_child_ids uuid[] default null,
   p_origin text default null,
-  p_destination text default null
+  p_destination text default null,
+  p_adult_count integer default 0
 )
 returns void
 language plpgsql
@@ -1503,13 +1518,14 @@ begin
       sitters_children_welcome = case when v_request_type = 'babysit' then coalesce(p_sitters_children_welcome, false) else false end,
       pets_are_present = case when v_request_type = 'babysit' then coalesce(p_pets_are_present, false) else false end,
       origin = case when v_request_type = 'drive' then p_origin else null end,
-      destination = case when v_request_type = 'drive' then p_destination else null end
+      destination = case when v_request_type = 'drive' then p_destination else null end,
+      adult_count = case when v_request_type = 'drive' then coalesce(p_adult_count, 0) else 0 end
   where id = p_request_id;
 
   delete from public.request_children
   where request_id = p_request_id;
 
-  if v_request_type = 'babysit' and coalesce(array_length(p_child_ids, 1), 0) > 0 then
+  if v_request_type in ('babysit', 'drive') and coalesce(array_length(p_child_ids, 1), 0) > 0 then
     if exists (
       select 1
       from unnest(p_child_ids) as child_id
