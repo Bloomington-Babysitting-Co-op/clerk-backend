@@ -206,6 +206,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     const pets_are_present = !!req.pets_are_present;
     const origin = req.origin || '';
     const destination = req.destination || '';
+    const adult_count = req.adult_count || 0;
 
     const typeSpecificHtml = (type.toLowerCase() === 'babysit') ? `
       <tr>
@@ -252,6 +253,21 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       <tr>
         <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Destination</td>
         <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${destination}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6;">Adults</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6;">${adult_count}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px; color:#6b7280; border-bottom:1px solid #f3f4f6; vertical-align:top;">Children</td>
+        <td style="padding:6px 8px; text-align: left; color:#111827; border-bottom:1px solid #f3f4f6; vertical-align:top;">
+          ${children.length > 0 ? children.map((c: any) => `
+            <div style="text-align: left; margin-bottom:8px; border-bottom:1px solid #f3f4f6;">
+              <div>${c.name} (${formatChildAge(c.date_of_birth)})</div>
+              ${c.car_seat ? `<div style="font-weight:600;">Car seat: ${c.car_seat}</div>` : ''}
+            </div>
+          `).join('') : 'No children selected'}
+        </td>
       </tr>
     ` : '');
 
