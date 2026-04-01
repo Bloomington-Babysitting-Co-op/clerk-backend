@@ -98,6 +98,26 @@ function formatChildAge(dob: unknown): string {
   return `${years}y ${months}m`;
 }
 
+function assignLabel(order: unknown, show: unknown): string;
+function assignLabel(order: unknown): string;
+function assignLabel(order: unknown, show?: unknown): string {
+  const labels = {
+    1: '<strong>Primary</strong>',
+    2: '<strong>Secondary</strong>',
+    3: '<strong>Tertiary</strong>'
+  } as Record<number, string>;
+
+  if (arguments.length === 2) {
+    if (!show) return '';
+    const n = Number(order ?? 0);
+    const label = labels[n];
+    return label ? ` as ${label}` : '';
+  }
+
+  const n = Number(order ?? 0);
+  return labels[n] ?? 'Unassigned';
+}
+
 function requestViewUrl(requestId: unknown): string {
   return `${FRONTEND_URL}/request-view?id=${String(requestId)}`;
 }
@@ -328,8 +348,8 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
   email_other_request_expiring: (meta) => ({
     subject: `${meta.requester_family_name}'s request will expire in 2 days`,
     html: layout(`
-      ${heading('No offers yet')}
-      ${body(`${meta.requester_family_name}'s upcoming request has not been assigned and is 2 days away.`)}
+      ${heading('Request expiring soon')}
+      ${body(`${meta.requester_family_name}'s upcoming request still needs coverage and is 2 days away.`)}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('Consider offering your help.')}
     `),
@@ -368,8 +388,8 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
   email_my_request_expiring: (meta) => ({
     subject: 'Your request will expire in 2 days',
     html: layout(`
-      ${heading('No offers yet')}
-      ${body('Your upcoming request has not been assigned and is 2 days away.')}
+      ${heading('Request expiring soon')}
+      ${body('Your upcoming request still needs coverage and is 2 days away.')}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
       ${muted('Consider reaching out to co-op members directly if you need coverage.')}
     `),
@@ -386,17 +406,32 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     `),
   }),
 
-  // Your offer was assigned / unassigned
+  // Your offer was assigned / unassigned / reassigned to a different priority
   email_my_offer_assigned: (meta) => {
+    if (meta.source === 'rpc_reorder_offer' || meta.source === 'rpc_cancel_offer:reorder' || meta.source === 'rpc_unassign_offer:reorder') {
+      return {
+        subject: 'Your offer priority changed',
+        html: layout(`
+          ${heading('Your offer priority changed')}
+          ${body(`Your offer to help on a request by the <strong>${meta.requester_family_name}</strong> family changed from ${assignLabel(meta.old_assign_order)} to ${assignLabel(meta.new_assign_order)}.`)}
+          ${Number(meta.new_assign_order) === 1
+            ? body('You are now expected to complete the request.')
+            : body('You may be asked to complete the request if the primary becomes unavailable.')}
+          ${btn(requestViewUrl(meta.request_id), 'View request')}
+          ${muted('Log in to view details.')}
+        `),
+      };
+    }
+
     const action = ({
-      rpc_assign_request: 'assigned',
-      rpc_unassign_request: 'unassigned'
+      rpc_assign_offer: 'assigned',
+      rpc_unassign_offer: 'unassigned'
     } as Record<string,string>)[meta.source] ?? 'changed';
     return {
       subject: `Your offer to help has been ${action}`,
       html: layout(`
         ${heading('Your offer status changed')}
-        ${body(`Your offer to help on a request by the <strong>${meta.requester_family_name}</strong> family has been ${action}.`)}
+        ${body(`Your offer to help on a request by the <strong>${meta.requester_family_name}</strong> family has been ${action}${assignLabel(meta.assign_order, meta.show_assign_order)}.`)}
         ${btn(requestViewUrl(meta.request_id), 'View request')}
         ${muted('Log in to view details.')}
       `),
@@ -425,12 +460,14 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
     subject: 'Request marked as completed',
     html: layout(`
       ${heading('Request completed')}
-      ${body(`A request by the <strong>${meta.requester_family_name}</strong> family that you were assigned to has been marked as completed.`)}
+      ${body(`You were assigned${assignLabel(meta.assign_order, meta.show_assign_order)} to a request by the <strong>${meta.requester_family_name}</strong> family that has been marked as completed.`)}
       ${btn(requestViewUrl(meta.request_id), 'View request')}
-      ${btn(entryUrl(), 'Submit ledger entry')}
-      ${muted('Log in to create a ledger entry and record the hours.')}
+      ${Number(meta.assign_order) === 1
+        ? `${btn(entryUrl(), 'Submit ledger entry')}
+      ${muted('Log in to create a ledger entry and record the hours.')}`
+        : muted('A ledger entry has been automatically recorded for your retainer hours.')}
     `),
-  }),
+  })
 };
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
