@@ -92,6 +92,7 @@ create table public.requests (
   flexible_start_time boolean not null default false,
   flexible_end_time boolean not null default false,
   hours numeric,
+  retainer_hours numeric not null default 0,
   sit_location text,
   meal_required boolean not null default false,
   meal_prepared_by_sitter boolean not null default false,
@@ -100,7 +101,6 @@ create table public.requests (
   origin text,
   destination text,
   adult_count integer not null default 0,
-  assignee_family_id uuid references public.families(id),
   created_at timestamptz default now(),
   created_by uuid not null default auth.uid() references auth.users(id),
   constraint requests_status_check check (
@@ -113,12 +113,10 @@ create table public.requests (
     (start_time is null or end_time is null) or (end_time > start_time)
   ),
   constraint requests_hours_check check (
-    hours is null or hours > 0
+    hours is null or (hours > 0 and mod(hours * 4, 1) = 0)
   ),
-  constraint assignee_family_id_valid check (
-    ((status = 'assigned'::text) and (assignee_family_id is not null))
-    or ((status <> 'assigned'::text) and (assignee_family_id is null))
-    or (status = 'completed'::text)
+  constraint requests_retainer_hours_check check (
+    retainer_hours >= 0 and mod(retainer_hours * 4, 1) = 0
   ),
   constraint requests_sit_location_check check (
     sit_location is null or sit_location = any (array['sitter_house'::text, 'requester_house'::text, 'either'::text])
@@ -150,13 +148,18 @@ create table public.offers (
   request_id uuid not null references public.requests(id) on delete cascade,
   family_id uuid not null references public.families(id) on delete cascade,
   notes text,
+  assign_order integer,
   created_at timestamptz not null default now(),
   created_by uuid not null default auth.uid() references auth.users(id),
-  unique (request_id, family_id)
+  unique (request_id, family_id),
+  constraint offers_assign_order_check check (
+    assign_order is null or (assign_order between 1 and 3)
+  )
 );
 
 create index offers_request_id_idx on public.offers(request_id);
 create index offers_family_id_idx on public.offers(family_id);
+create unique index offers_request_assign_order_unique on public.offers(request_id, assign_order) where assign_order is not null;
 
 -- Table: ledger_entries stores hour transfers between families
 create table public.ledger_entries (
@@ -366,6 +369,8 @@ declare
   v_today date := public.rpc_local_today();
   v_request record;
   v_rec record;
+  v_entry_id uuid;
+  v_ledger_rec record;
 begin
   -- Expire requests that are past and were never assigned
   for v_request in
@@ -401,7 +406,7 @@ begin
 
   -- Close requests that are past and were assigned
   for v_request in
-    select id, requester_family_id, assignee_family_id
+    select id, requester_family_id, date, retainer_hours
     from public.requests
     where date < v_today
       and status = 'assigned'
@@ -410,13 +415,15 @@ begin
     set status = 'completed'
     where id = v_request.id;
 
-    -- Notify users who opted into email_my_offer_completed
+    -- Notify all assigned families who opted into email_my_offer_completed
     for v_rec in
-      select u.email
+      select u.email, o.assign_order
       from auth.users u
       join public.family_parents fp on fp.user_id = u.id
+      join public.offers o on o.family_id = fp.family_id
       join public.families f on f.id = fp.family_id
-      where fp.family_id = v_request.assignee_family_id
+      where o.request_id = v_request.id
+        and o.assign_order is not null
         and fp.email_my_offer_completed = true
         and f.is_active = true
     loop
@@ -426,10 +433,68 @@ begin
         'rpc_refresh_request_statuses',
         jsonb_build_object(
           'request_id', v_request.id,
-          'requester_family_name', public.rpc_family_name(v_request.requester_family_id)
+          'requester_family_name', public.rpc_family_name(v_request.requester_family_id),
+          'assign_order', v_rec.assign_order,
+          'show_assign_order', (v_request.retainer_hours > 0)
         )
       );
     end loop;
+
+    -- Auto-create retainer ledger entries for backup assignees (assign_order > 1)
+    if v_request.retainer_hours > 0 then
+      for v_rec in
+        select o.family_id
+        from public.offers o
+        where o.request_id = v_request.id
+          and o.assign_order is not null
+          and o.assign_order > 1
+      loop
+        insert into public.ledger_entries (
+          from_family_id,
+          to_family_id,
+          type,
+          date,
+          hours,
+          notes,
+          request_id,
+          created_by
+        )
+        values (
+          v_request.requester_family_id,
+          v_rec.family_id,
+          'request',
+          v_request.date,
+          v_request.retainer_hours,
+          'Retainer hours (backup sitter)',
+          v_request.id,
+          (select id from auth.users where email = 'automation@bbc.clerk')
+        )
+        returning id into v_entry_id;
+
+        -- Notify users who opted into email_ledger_change
+        for v_ledger_rec in
+          select u.email, fp.family_id
+          from auth.users u
+          join public.family_parents fp on fp.user_id = u.id
+          join public.families f on f.id = fp.family_id
+          where fp.family_id in (v_request.requester_family_id, v_rec.family_id)
+            and fp.email_ledger_change = true
+            and f.is_active = true
+        loop
+          perform public.rpc_send_email(
+            v_ledger_rec.email,
+            'email_ledger_change',
+            'rpc_refresh_request_statuses',
+            jsonb_build_object(
+              'ledger_id', v_entry_id,
+              'hours_delta', case when v_ledger_rec.family_id = v_request.requester_family_id then -v_request.retainer_hours else v_request.retainer_hours end,
+              'current_balance', public.rpc_hours_balance_as_of(v_ledger_rec.family_id, v_today),
+              'author_email', 'automation@bbc.clerk'
+            )
+          );
+        end loop;
+      end loop;
+    end if;
   end loop;
 end;
 $$;
@@ -534,7 +599,8 @@ returns table (
   flexible_date boolean,
   flexible_start_time boolean,
   flexible_end_time boolean,
-  hours numeric
+  hours numeric,
+  retainer_hours numeric
 )
 language plpgsql
 security definer
@@ -560,12 +626,24 @@ begin
     r.flexible_date,
     r.flexible_start_time,
     r.flexible_end_time,
-    r.hours
+    r.hours,
+    r.retainer_hours
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   cross join me
   where r.requester_family_id <> me.family_id
-    and r.status in ('open', 'offered')
+    and ( r.status in ('open', 'offered')
+      or ( r.status = 'assigned'
+        and r.retainer_hours > 0
+        and not exists (
+          select 1
+          from public.offers o
+          where o.request_id = r.id
+            and o.assign_order is not null
+          having count(*) = 3
+        )
+      )
+    )
     and not exists (
       select 1
       from public.offers o
@@ -647,7 +725,8 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean,
   hours numeric,
-  offer_created_at timestamptz
+  offer_created_at timestamptz,
+  assign_order integer
 )
 language plpgsql
 security definer
@@ -674,13 +753,14 @@ begin
     r.flexible_start_time,
     r.flexible_end_time,
     r.hours,
-    o.created_at as offer_created_at
+    o.created_at as offer_created_at,
+    o.assign_order
   from public.offers o
   join public.requests r on r.id = o.request_id
   join public.families f on f.id = r.requester_family_id
   cross join me
   where o.family_id = me.family_id
-    and (r.status = 'offered' or (r.status = 'assigned' and r.assignee_family_id = me.family_id))
+    and r.status in ('offered', 'assigned')
   order by
     r.date asc nulls first,
     r.start_time asc nulls first,
@@ -1152,6 +1232,7 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean,
   hours numeric,
+  retainer_hours numeric,
   sit_location text,
   meal_required boolean,
   meal_prepared_by_sitter boolean,
@@ -1160,7 +1241,6 @@ returns table (
   origin text,
   destination text,
   adult_count integer,
-  assignee_family_id uuid,
   created_at timestamptz
 )
 language plpgsql
@@ -1185,6 +1265,7 @@ begin
     r.flexible_start_time,
     r.flexible_end_time,
     r.hours,
+    r.retainer_hours,
     r.sit_location,
     r.meal_required,
     r.meal_prepared_by_sitter,
@@ -1193,7 +1274,6 @@ begin
     r.origin,
     r.destination,
     r.adult_count,
-    r.assignee_family_id,
     r.created_at
   from public.requests r
   join public.families f on f.id = r.requester_family_id
@@ -1241,6 +1321,7 @@ returns table (
   hours_balance numeric,
   active_this_month boolean,
   notes text,
+  assign_order integer,
   created_at timestamptz
 )
 language sql
@@ -1256,11 +1337,13 @@ as $$
     public.rpc_hours_balance_as_of(o.family_id, public.rpc_local_today()) as hours_balance,
     public.rpc_active_this_month(o.family_id) as active_this_month,
     o.notes,
+    o.assign_order,
     o.created_at
   from public.offers o
   join public.families f on f.id = o.family_id
   where o.request_id = p_request_id
   order by
+    o.assign_order asc nulls last,
     active_this_month asc,
     hours_balance asc,
     o.created_at asc,
@@ -1278,6 +1361,7 @@ create or replace function public.rpc_create_request(
   p_flexible_start_time boolean default false,
   p_flexible_end_time boolean default false,
   p_hours numeric default null,
+  p_retainer_hours numeric default 0,
   p_sit_location text default null,
   p_meal_required boolean default false,
   p_meal_prepared_by_sitter boolean default false,
@@ -1348,6 +1432,7 @@ begin
     flexible_start_time,
     flexible_end_time,
     hours,
+    retainer_hours,
     sit_location,
     meal_required,
     meal_prepared_by_sitter,
@@ -1369,6 +1454,7 @@ begin
     coalesce(p_flexible_start_time, false),
     coalesce(p_flexible_end_time, false),
     v_hours,
+    coalesce(p_retainer_hours, 0),
     case when p_type = 'babysit' then p_sit_location else null end,
     case when p_type = 'babysit' then coalesce(p_meal_required, false) else false end,
     case when p_type = 'babysit' then coalesce(p_meal_prepared_by_sitter, false) else false end,
@@ -1438,6 +1524,7 @@ create or replace function public.rpc_update_request(
   p_flexible_start_time boolean default false,
   p_flexible_end_time boolean default false,
   p_hours numeric default null,
+  p_retainer_hours numeric default 0,
   p_sit_location text default null,
   p_meal_required boolean default false,
   p_meal_prepared_by_sitter boolean default false,
@@ -1457,6 +1544,7 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_request_type text;
   v_hours numeric := p_hours;
+  v_retainer_hours numeric := coalesce(p_retainer_hours, 0);
   v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
@@ -1503,6 +1591,16 @@ begin
     raise exception 'Hours must be greater than zero';
   end if;
 
+  -- Disallow retainer_hours changes if backup sitters are already assigned
+  if exists (
+    select 1 from public.offers o
+    where o.request_id = p_request_id and o.assign_order > 1
+  ) and v_retainer_hours IS DISTINCT FROM (
+    select retainer_hours from public.requests where id = p_request_id
+  ) then
+    raise exception 'Cannot change retainer hours while backup sitters are assigned';
+  end if;
+
   update public.requests
     set notes = p_notes,
       date = p_date,
@@ -1512,6 +1610,7 @@ begin
       flexible_start_time = coalesce(p_flexible_start_time, false),
       flexible_end_time = coalesce(p_flexible_end_time, false),
       hours = v_hours,
+      retainer_hours = v_retainer_hours,
       sit_location = case when v_request_type = 'babysit' then p_sit_location else null end,
       meal_required = case when v_request_type = 'babysit' then coalesce(p_meal_required, false) else false end,
       meal_prepared_by_sitter = case when v_request_type = 'babysit' then coalesce(p_meal_prepared_by_sitter, false) else false end,
@@ -1579,8 +1678,7 @@ declare
   v_rec record;
 begin
   update public.requests
-  set status = 'cancelled',
-      assignee_family_id = null
+  set status = 'cancelled'
   where id = p_request_id
     and requester_family_id = v_family_id
     and status in ('open', 'offered', 'assigned');
@@ -1588,6 +1686,12 @@ begin
   if not found then
     raise exception 'Request not found or cannot be cancelled';
   end if;
+
+  -- Clear assign_order on all offers for this request
+  update public.offers
+  set assign_order = null
+  where request_id = p_request_id
+    and assign_order is not null;
 
   -- Notify users who opted into email_my_offer_change
   for v_rec in
@@ -1626,12 +1730,15 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_requester_family_id uuid;
   v_request_status text;
+  v_retainer_hours numeric;
+  v_assigned_count integer;
+  v_offer_id uuid;
   v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  select requester_family_id, status
-  into v_requester_family_id, v_request_status
+  select requester_family_id, status, retainer_hours
+  into v_requester_family_id, v_request_status, v_retainer_hours
   from public.requests
   where id = p_request_id;
 
@@ -1643,13 +1750,35 @@ begin
     raise exception 'Requester cannot offer on own request';
   end if;
 
-  if v_request_status not in ('open', 'offered') then
+  if v_request_status not in ('open', 'offered', 'assigned') then
     raise exception 'Request cannot be offered in current status';
+  end if;
+
+  if v_request_status = 'assigned' and v_retainer_hours = 0 then
+      raise exception 'Request has been assigned and does not require a backup';
+  end if;
+
+  if v_request_status = 'assigned' then
+    select count(*)::integer
+    into v_assigned_count
+    from public.offers o
+    where o.request_id = p_request_id
+      and o.assign_order is not null;
+
+    if v_assigned_count >= 3 then
+      raise exception 'All assignment slots are already filled';
+    end if;
   end if;
 
   insert into public.offers (request_id, family_id, notes)
   values (p_request_id, v_family_id, p_notes)
-  on conflict (request_id, family_id) do nothing;
+  on conflict (request_id, family_id) do nothing
+  returning id into v_offer_id;
+
+  -- Idempotent no-op for duplicate offer attempts. Avoid duplicate requester notifications.
+  if v_offer_id is null then
+    return;
+  end if;
 
   update public.requests
   set status = 'offered'
@@ -1759,15 +1888,16 @@ declare
   v_family_id uuid := public.rpc_my_family_id();
   v_offer_request_id uuid;
   v_offer_family_id uuid;
+  v_offer_assign_order integer;
   v_requester_family_id uuid;
   v_request_status text;
-  v_assignee_family_id uuid;
+  v_offers record;
   v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  select o.request_id, o.family_id
-  into v_offer_request_id, v_offer_family_id
+  select o.request_id, o.family_id, o.assign_order
+  into v_offer_request_id, v_offer_family_id, v_offer_assign_order
   from public.offers o
   where o.id = p_offer_id;
 
@@ -1779,8 +1909,8 @@ begin
     raise exception 'Only the offering family can cancel this offer';
   end if;
 
-  select r.requester_family_id, r.status, r.assignee_family_id
-  into v_requester_family_id, v_request_status, v_assignee_family_id
+  select r.requester_family_id, r.status
+  into v_requester_family_id, v_request_status
   from public.requests r
   where r.id = v_offer_request_id;
 
@@ -1791,18 +1921,56 @@ begin
   delete from public.offers
   where id = p_offer_id;
 
+  -- Compact remaining assign_orders if the cancelled offer was assigned
+  if v_offer_assign_order is not null then
+    for v_offers in
+      with reorder as (
+        update public.offers o
+        set assign_order = o.assign_order - 1
+        where o.request_id = v_offer_request_id
+          and o.assign_order > v_offer_assign_order
+        returning o.family_id, (o.assign_order + 1) as old_assign_order, o.assign_order as new_assign_order
+      )
+      select * from reorder
+    loop
+      -- Notify families whose assignment priority changed due to compaction
+      for v_rec in
+        select u.email
+        from auth.users u
+        join public.family_parents fp on fp.user_id = u.id
+        join public.families f on f.id = fp.family_id
+        where fp.family_id = v_offers.family_id
+          and fp.email_my_offer_assigned = true
+          and f.is_active = true
+      loop
+        perform public.rpc_send_email(
+          v_rec.email,
+          'email_my_offer_assigned',
+          'rpc_cancel_offer:reorder',
+          jsonb_build_object(
+            'request_id', v_offer_request_id,
+            'requester_family_name', public.rpc_family_name(v_requester_family_id),
+            'old_assign_order', v_offers.old_assign_order,
+            'new_assign_order', v_offers.new_assign_order
+          )
+        );
+      end loop;
+    end loop;
+  end if;
+
+  -- Update request status based on remaining offers/assignments
   if not exists (
     select 1 from public.offers o where o.request_id = v_offer_request_id
   ) then
     update public.requests
-    set status = 'open',
-        assignee_family_id = null
+    set status = 'open'
     where id = v_offer_request_id;
-  elsif v_request_status = 'assigned' and v_assignee_family_id = v_family_id then
-      update public.requests
-      set status = 'offered',
-          assignee_family_id = null
-      where id = v_offer_request_id;
+  elsif v_request_status = 'assigned' and not exists (
+    select 1 from public.offers o where o.request_id = v_offer_request_id and o.assign_order is not null
+  ) then
+    update public.requests
+    set status = 'offered'
+    where id = v_offer_request_id;
   end if;
 
   -- Notify users who opted into email_my_request_offered
@@ -1828,10 +1996,10 @@ begin
 end;
 $$;
 
--- RPC: requester selects the winning offer and assigns request
-create or replace function public.rpc_assign_request(
-  p_request_id uuid,
-  p_offer_id uuid
+-- RPC: requester assigns an offer to a priority slot
+create or replace function public.rpc_assign_offer(
+  p_offer_id uuid,
+  p_assign_order integer
 )
 returns void
 language plpgsql
@@ -1840,43 +2008,79 @@ set search_path = public
 as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
+  v_offer_request_id uuid;
+  v_offer_family_id uuid;
+  v_offer_current_order integer;
   v_requester_family_id uuid;
   v_status text;
-  v_offer_family_id uuid;
+  v_retainer_hours numeric;
   v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  select requester_family_id, status
-  into v_requester_family_id, v_status
-  from public.requests
-  where id = p_request_id;
-
-  if not found then
-    raise exception 'Request not found';
+  if p_assign_order is null or p_assign_order not between 1 and 3 then
+    raise exception 'Assign order must be between 1 and 3';
   end if;
+
+  select o.request_id, o.family_id, o.assign_order
+  into v_offer_request_id, v_offer_family_id, v_offer_current_order
+  from public.offers o
+  where o.id = p_offer_id;
+
+  if v_offer_request_id is null then
+    raise exception 'Offer not found';
+  end if;
+
+  if v_offer_current_order is not null then
+    raise exception 'Offer is already assigned';
+  end if;
+
+  select r.requester_family_id, r.status, r.retainer_hours
+  into v_requester_family_id, v_status, v_retainer_hours
+  from public.requests r
+  where r.id = v_offer_request_id;
 
   if v_requester_family_id <> v_family_id then
-    raise exception 'Only requester can select winner';
+    raise exception 'Only requester can assign offers';
   end if;
 
-  if v_status <> 'offered' then
-    raise exception 'Request must be offered before selecting winner';
+  if v_status not in ('offered', 'assigned') then
+    raise exception 'Request must have offers before assigning';
   end if;
 
-  select o.family_id into v_offer_family_id
-  from public.offers o
-  where o.id = p_offer_id
-    and o.request_id = p_request_id;
-
-  if v_offer_family_id is null then
-    raise exception 'Offer not found for request';
+  -- Secondary/tertiary require retainer_hours > 0
+  if p_assign_order > 1 and v_retainer_hours <= 0 then
+    raise exception 'Retainer hours must be set to assign backup sitters';
   end if;
 
-  update public.requests
-  set status = 'assigned',
-      assignee_family_id = v_offer_family_id
-  where id = p_request_id;
+  -- Enforce sequential: cannot assign order N unless N-1 exists
+  if p_assign_order > 1 and not exists (
+    select 1 from public.offers o
+    where o.request_id = v_offer_request_id
+      and o.assign_order = p_assign_order - 1
+  ) then
+    raise exception 'Must assign previous priority slot first';
+  end if;
+
+  -- Check slot not already taken
+  if exists (
+    select 1 from public.offers o
+    where o.request_id = v_offer_request_id
+      and o.assign_order = p_assign_order
+  ) then
+    raise exception 'This priority slot is already assigned';
+  end if;
+
+  update public.offers
+  set assign_order = p_assign_order
+  where id = p_offer_id;
+
+  -- Transition request to assigned on first assignment
+  if v_status = 'offered' then
+    update public.requests
+    set status = 'assigned'
+    where id = v_offer_request_id;
+  end if;
 
   -- Notify users who opted into email_my_offer_assigned
   for v_rec in
@@ -1891,19 +2095,21 @@ begin
     perform public.rpc_send_email(
       v_rec.email,
       'email_my_offer_assigned',
-      'rpc_assign_request',
+      'rpc_assign_offer',
       jsonb_build_object(
-        'request_id', p_request_id,
-        'requester_family_name', public.rpc_family_name(v_requester_family_id)
+        'request_id', v_offer_request_id,
+        'requester_family_name', public.rpc_family_name(v_requester_family_id),
+        'assign_order', p_assign_order,
+        'show_assign_order', (v_retainer_hours > 0)
       )
     );
   end loop;
 end;
 $$;
 
--- RPC: requester clears accepted assignee and reopens offer state
-create or replace function public.rpc_unassign_request(
-  p_request_id uuid
+-- RPC: requester removes an assigned offer
+create or replace function public.rpc_unassign_offer(
+  p_offer_id uuid
 )
 returns void
 language plpgsql
@@ -1912,38 +2118,95 @@ set search_path = public
 as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
+  v_offer_request_id uuid;
+  v_offer_family_id uuid;
+  v_offer_assign_order integer;
   v_requester_family_id uuid;
   v_status text;
-  v_assignee_family_id uuid;
+  v_offers record;
   v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  select requester_family_id, status, assignee_family_id
-  into v_requester_family_id, v_status, v_assignee_family_id
-  from public.requests
-  where id = p_request_id;
+  select o.request_id, o.family_id, o.assign_order
+  into v_offer_request_id, v_offer_family_id, v_offer_assign_order
+  from public.offers o
+  where o.id = p_offer_id;
 
-  if not found then
-    raise exception 'Request not found';
+  if v_offer_request_id is null then
+    raise exception 'Offer not found';
   end if;
 
+  if v_offer_assign_order is null then
+    raise exception 'Offer is not assigned';
+  end if;
+
+  select r.requester_family_id, r.status
+  into v_requester_family_id, v_status
+  from public.requests r
+  where r.id = v_offer_request_id;
+
   if v_requester_family_id <> v_family_id then
-    raise exception 'Only requester can clear accepted offer';
+    raise exception 'Only requester can unassign offers';
   end if;
 
   if v_status <> 'assigned' then
-    raise exception 'Only assigned requests can clear accepted offer';
+    raise exception 'Request must be assigned to unassign offers';
   end if;
 
-  update public.requests
-  set status = case
-        when exists (select 1 from public.offers o where o.request_id = p_request_id) then 'offered'
-        else 'open'
-      end,
-      assignee_family_id = null
-  where id = p_request_id
-    and status = 'assigned';
+  -- Clear the assignment
+  update public.offers
+  set assign_order = null
+  where id = p_offer_id;
+
+  -- Compact remaining assign_orders
+  for v_offers in
+    with reorder as (
+      update public.offers o
+      set assign_order = o.assign_order - 1
+      where o.request_id = v_offer_request_id
+        and o.assign_order > v_offer_assign_order
+      returning o.family_id, (o.assign_order + 1) as old_assign_order, o.assign_order as new_assign_order
+    )
+    select * from reorder
+  loop
+    -- Notify families whose assignment priority changed due to compaction
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where fp.family_id = v_offers.family_id
+        and fp.email_my_offer_assigned = true
+        and f.is_active = true
+    loop
+      perform public.rpc_send_email(
+        v_rec.email,
+        'email_my_offer_assigned',
+        'rpc_unassign_offer:reorder',
+        jsonb_build_object(
+          'request_id', v_offer_request_id,
+          'requester_family_name', public.rpc_family_name(v_requester_family_id),
+          'old_assign_order', v_offers.old_assign_order,
+          'new_assign_order', v_offers.new_assign_order
+        )
+      );
+    end loop;
+  end loop;
+
+  -- Revert request status if no more assigned offers
+  if not exists (
+    select 1 from public.offers o
+    where o.request_id = v_offer_request_id
+      and o.assign_order is not null
+  ) then
+    update public.requests
+    set status = case
+          when exists (select 1 from public.offers o where o.request_id = v_offer_request_id) then 'offered'
+          else 'open'
+        end
+    where id = v_offer_request_id;
+  end if;
 
   -- Notify users who opted into email_my_offer_assigned
   for v_rec in
@@ -1951,20 +2214,158 @@ begin
     from auth.users u
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
-    where fp.family_id = v_assignee_family_id
+    where fp.family_id = v_offer_family_id
       and fp.email_my_offer_assigned = true
       and f.is_active = true
   loop
     perform public.rpc_send_email(
       v_rec.email,
       'email_my_offer_assigned',
-      'rpc_unassign_request',
+      'rpc_unassign_offer',
       jsonb_build_object(
-        'request_id', p_request_id,
-        'requester_family_name', public.rpc_family_name(v_requester_family_id)
+        'request_id', v_offer_request_id,
+        'requester_family_name', public.rpc_family_name(v_requester_family_id),
+        'assign_order', v_offer_assign_order,
+        'show_assign_order', false
       )
     );
   end loop;
+end;
+$$;
+
+-- RPC: requester reorders an assigned offer to a different priority slot
+create or replace function public.rpc_reorder_offer(
+  p_offer_id uuid,
+  p_new_assign_order integer
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid := public.rpc_my_family_id();
+  v_offer_request_id uuid;
+  v_offer_family_id uuid;
+  v_offer_current_order integer;
+  v_requester_family_id uuid;
+  v_status text;
+  v_max_assign_order integer;
+  v_other_offer_id uuid;
+  v_other_offer_family_id uuid;
+  v_rec record;
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  if p_new_assign_order is null or p_new_assign_order not between 1 and 3 then
+    raise exception 'Assign order must be between 1 and 3';
+  end if;
+
+  select o.request_id, o.family_id, o.assign_order
+  into v_offer_request_id, v_offer_family_id, v_offer_current_order
+  from public.offers o
+  where o.id = p_offer_id;
+
+  if v_offer_request_id is null then
+    raise exception 'Offer not found';
+  end if;
+
+  if v_offer_current_order is null then
+    raise exception 'Offer is not assigned';
+  end if;
+
+  if v_offer_current_order = p_new_assign_order then
+    return; -- no-op
+  end if;
+
+  select r.requester_family_id, r.status
+  into v_requester_family_id, v_status
+  from public.requests r
+  where r.id = v_offer_request_id;
+
+  if v_requester_family_id <> v_family_id then
+    raise exception 'Only requester can reorder offers';
+  end if;
+
+  if v_status <> 'assigned' then
+    raise exception 'Request must be assigned to reorder offers';
+  end if;
+
+  -- Find the offer currently at the target slot (if any) and swap
+  select o.id, o.family_id
+  into v_other_offer_id, v_other_offer_family_id
+  from public.offers o
+  where o.request_id = v_offer_request_id
+    and o.assign_order = p_new_assign_order;
+
+  if v_other_offer_id is not null then
+    -- Swap: temporarily set current to null to avoid unique constraint violation
+    update public.offers set assign_order = null where id = p_offer_id;
+    update public.offers set assign_order = v_offer_current_order where id = v_other_offer_id;
+    update public.offers set assign_order = p_new_assign_order where id = p_offer_id;
+  else
+    -- No offer at target slot: only allow filling the next higher-priority gap.
+    select max(o.assign_order)
+    into v_max_assign_order
+    from public.offers o
+    where o.request_id = v_offer_request_id
+      and o.assign_order is not null;
+
+    if p_new_assign_order <> v_offer_current_order - 1
+      or p_new_assign_order > coalesce(v_max_assign_order, 0) then
+      raise exception 'Cannot move to an empty slot unless it is the next higher-priority slot';
+    end if;
+
+    update public.offers set assign_order = p_new_assign_order where id = p_offer_id;
+  end if;
+
+  -- Notify moved family about priority change
+  for v_rec in
+    select u.email
+    from auth.users u
+    join public.family_parents fp on fp.user_id = u.id
+    join public.families f on f.id = fp.family_id
+    where fp.family_id = v_offer_family_id
+      and fp.email_my_offer_assigned = true
+      and f.is_active = true
+  loop
+    perform public.rpc_send_email(
+      v_rec.email,
+      'email_my_offer_assigned',
+      'rpc_reorder_offer',
+      jsonb_build_object(
+        'request_id', v_offer_request_id,
+        'requester_family_name', public.rpc_family_name(v_requester_family_id),
+        'old_assign_order', v_offer_current_order,
+        'new_assign_order', p_new_assign_order
+      )
+    );
+  end loop;
+
+  -- Notify swapped family if target slot was occupied
+  if v_other_offer_id is not null then
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where fp.family_id = v_other_offer_family_id
+        and fp.email_my_offer_assigned = true
+        and f.is_active = true
+    loop
+      perform public.rpc_send_email(
+        v_rec.email,
+        'email_my_offer_assigned',
+        'rpc_reorder_offer',
+        jsonb_build_object(
+          'request_id', v_offer_request_id,
+          'requester_family_name', public.rpc_family_name(v_requester_family_id),
+          'old_assign_order', p_new_assign_order,
+          'new_assign_order', v_offer_current_order
+        )
+      );
+    end loop;
+  end if;
 end;
 $$;
 
@@ -2071,7 +2472,7 @@ as $$
     r.id as request_id,
     r.type as request_type,
     r.requester_family_id as from_family_id,
-    r.assignee_family_id as to_family_id,
+    o.family_id as to_family_id,
     ff.name as from_family_name,
     tf.name as to_family_name,
     r.date as request_date,
@@ -2087,16 +2488,18 @@ as $$
     ) as hours,
     r.notes
   from public.requests r
+  join public.offers o on o.request_id = r.id and o.assign_order = 1
   join public.families ff on r.requester_family_id = ff.id
-  join public.families tf on r.assignee_family_id = tf.id
+  join public.families tf on o.family_id = tf.id
   cross join me
   where r.status = 'completed'
     and r.date >= (public.rpc_local_today() - interval '1 month')::date
-    and r.assignee_family_id = me.family_id
+    and o.family_id = me.family_id
     and not exists (
       select 1
       from public.ledger_entries le
       where le.request_id = r.id
+        and le.to_family_id = me.family_id
     )
   order by r.date desc nulls last,
     r.id;
@@ -2284,7 +2687,11 @@ as $$
       select 1
       from public.requests r
       where r.requester_family_id = p_family_id
-         or r.assignee_family_id = p_family_id
+    )
+    and not exists (
+      select 1
+      from public.offers o
+      where o.family_id = p_family_id
     )
     and not exists (
       select 1
@@ -2444,6 +2851,7 @@ as $$
   left join public.family_parents fp on fp.user_id = u.id
   left join public.families f on f.id = fp.family_id
   where public.rpc_my_is_admin()
+    and u.email <> 'automation@bbc.clerk'
   order by u.email, u.id;
 $$;
 
@@ -2623,7 +3031,7 @@ grant execute on function public.rpc_update_my_family_photo(text) to authenticat
 grant execute on function public.rpc_list_my_family_children() to authenticated, service_role;
 grant execute on function public.rpc_merge_my_family_children(jsonb) to authenticated, service_role;
 grant execute on function public.rpc_get_my_parent_profile() to authenticated, service_role;
-grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
+grant execute on function public.rpc_update_my_parent_profile(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated, service_role;
 
 -- Families
 grant execute on function public.rpc_list_families_all() to authenticated, service_role;
@@ -2634,14 +3042,15 @@ grant execute on function public.rpc_list_requests_filtered(date, date, uuid) to
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
-grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
-grant execute on function public.rpc_update_request(uuid, text, date, time, time, boolean, boolean, boolean, numeric, text, boolean, boolean, boolean, uuid[], text, text) to authenticated, service_role;
+grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, numeric, text, boolean, boolean, boolean, boolean, uuid[], text, text, integer) to authenticated, service_role;
+grant execute on function public.rpc_update_request(uuid, text, date, time, time, boolean, boolean, boolean, numeric, numeric, text, boolean, boolean, boolean, boolean, uuid[], text, text, integer) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_create_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_update_offer(uuid, text) to authenticated, service_role;
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
-grant execute on function public.rpc_assign_request(uuid, uuid) to authenticated, service_role;
-grant execute on function public.rpc_unassign_request(uuid) to authenticated, service_role;
+grant execute on function public.rpc_assign_offer(uuid, integer) to authenticated, service_role;
+grant execute on function public.rpc_unassign_offer(uuid) to authenticated, service_role;
+grant execute on function public.rpc_reorder_offer(uuid, integer) to authenticated, service_role;
 
 -- Ledger
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
@@ -2708,7 +3117,19 @@ begin
     join public.families f on f.id = fp.family_id
     join public.requests r on r.requester_family_id <> fp.family_id
       and not exists (select 1 from public.offers o where o.request_id = r.id and o.family_id = fp.family_id)
-    where r.status in ('open','offered')
+    where (
+        r.status in ('open', 'offered')
+        or (
+          r.status = 'assigned'
+          and r.retainer_hours > 0
+          and (
+            select count(*)
+            from public.offers o2
+            where o2.request_id = r.id
+              and o2.assign_order is not null
+          ) < 3
+        )
+      )
       and r.date = (v_today + interval '2 days')::date
       and fp.email_other_request_expiring = true
       and f.is_active = true
@@ -2753,7 +3174,19 @@ begin
     join public.family_parents fp on fp.user_id = u.id
     join public.families f on f.id = fp.family_id
     join public.requests r on r.requester_family_id = fp.family_id
-    where r.status in ('open','offered')
+    where (
+        r.status in ('open', 'offered')
+        or (
+          r.status = 'assigned'
+          and r.retainer_hours > 0
+          and (
+            select count(*)
+            from public.offers o2
+            where o2.request_id = r.id
+              and o2.assign_order is not null
+          ) < 3
+        )
+      )
       and r.date = (v_today + interval '2 days')::date
       and fp.email_my_request_expiring = true
       and f.is_active = true
