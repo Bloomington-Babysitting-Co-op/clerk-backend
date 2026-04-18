@@ -358,6 +358,42 @@ as $$
   select name from public.families where id = family_id;
 $$;
 
+-- Function: derive request list background color token
+create or replace function public.rpc_request_bg_color(
+  p_request_id uuid,
+  p_request_date date,
+  p_request_created_at timestamptz
+)
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with c as (
+    select
+      public.rpc_local_today() as today,
+      (p_request_created_at at time zone 'America/Chicago')::date as request_created_at
+  )
+  select case
+    when exists (
+      select 1
+      from public.offers o
+      where o.request_id = p_request_id
+    ) then null
+    when p_request_date is null then null
+    when p_request_date < c.today then null
+    when p_request_date <= (c.today + interval '1 day')::date then 'red'
+    when c.request_created_at <= (c.today - interval '7 day')::date then 'red'
+    when p_request_date <= (c.today + interval '3 day')::date then 'orange'
+    when c.request_created_at <= (c.today - interval '5 day')::date then 'orange'
+    when p_request_date <= (c.today + interval '5 day')::date then 'yellow'
+    when c.request_created_at <= (c.today - interval '3 day')::date then 'yellow'
+    else null
+  end
+  from c;
+$$;
+
 -- Function: refresh request statuses based on date lifecycle
 create or replace function public.rpc_refresh_request_statuses()
 returns void
@@ -601,7 +637,7 @@ returns table (
   flexible_end_time boolean,
   hours numeric,
   retainer_hours numeric,
-  has_offers boolean
+  bg_color text
 )
 language plpgsql
 security definer
@@ -629,11 +665,7 @@ begin
     r.flexible_end_time,
     r.hours,
     r.retainer_hours,
-    exists (
-      select 1
-      from public.offers offer_lookup
-      where offer_lookup.request_id = r.id
-    ) as has_offers
+    public.rpc_request_bg_color(r.id, r.date, r.created_at) as bg_color
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   cross join me
@@ -678,7 +710,7 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean,
   hours numeric,
-  has_offers boolean
+  bg_color text
 )
 language plpgsql
 security definer
@@ -704,11 +736,7 @@ begin
     r.flexible_start_time,
     r.flexible_end_time,
     r.hours,
-    exists (
-      select 1
-      from public.offers offer_lookup
-      where offer_lookup.request_id = r.id
-    ) as has_offers
+    public.rpc_request_bg_color(r.id, r.date, r.created_at) as bg_color
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   cross join me
@@ -739,7 +767,7 @@ returns table (
   hours numeric,
   offer_created_at timestamptz,
   assign_order integer,
-  has_offers boolean
+  bg_color text
 )
 language plpgsql
 security definer
@@ -768,7 +796,7 @@ begin
     r.hours,
     o.created_at as offer_created_at,
     o.assign_order,
-    true as has_offers
+    null as bg_color
   from public.offers o
   join public.requests r on r.id = o.request_id
   join public.families f on f.id = r.requester_family_id
@@ -1196,7 +1224,7 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean,
   hours numeric,
-  has_offers boolean
+  bg_color text
 )
 language plpgsql
 security definer
@@ -1219,11 +1247,7 @@ begin
     r.flexible_start_time,
     r.flexible_end_time,
     r.hours,
-    exists (
-      select 1
-      from public.offers offer_lookup
-      where offer_lookup.request_id = r.id
-    ) as has_offers
+    public.rpc_request_bg_color(r.id, r.date, r.created_at) as bg_color
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   where (p_start_date is null or r.date >= p_start_date)
