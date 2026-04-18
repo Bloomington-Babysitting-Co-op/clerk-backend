@@ -1495,8 +1495,6 @@ begin
     where fp.family_id <> v_family_id
       and fp.email_other_request_new = true
       and f.is_active = true
-    union all
-    select 'bloomingtonbabysittingco-op@googlegroups.com'::text as email
   loop
     perform public.rpc_send_email(
       v_rec.email,
