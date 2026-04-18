@@ -600,7 +600,8 @@ returns table (
   flexible_start_time boolean,
   flexible_end_time boolean,
   hours numeric,
-  retainer_hours numeric
+  retainer_hours numeric,
+  has_offers boolean
 )
 language plpgsql
 security definer
@@ -627,7 +628,12 @@ begin
     r.flexible_start_time,
     r.flexible_end_time,
     r.hours,
-    r.retainer_hours
+    r.retainer_hours,
+    exists (
+      select 1
+      from public.offers offer_lookup
+      where offer_lookup.request_id = r.id
+    ) as has_offers
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   cross join me
@@ -671,7 +677,8 @@ returns table (
   flexible_date boolean,
   flexible_start_time boolean,
   flexible_end_time boolean,
-  hours numeric
+  hours numeric,
+  has_offers boolean
 )
 language plpgsql
 security definer
@@ -696,7 +703,12 @@ begin
     r.flexible_date,
     r.flexible_start_time,
     r.flexible_end_time,
-    r.hours
+    r.hours,
+    exists (
+      select 1
+      from public.offers offer_lookup
+      where offer_lookup.request_id = r.id
+    ) as has_offers
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   cross join me
@@ -726,7 +738,8 @@ returns table (
   flexible_end_time boolean,
   hours numeric,
   offer_created_at timestamptz,
-  assign_order integer
+  assign_order integer,
+  has_offers boolean
 )
 language plpgsql
 security definer
@@ -754,7 +767,8 @@ begin
     r.flexible_end_time,
     r.hours,
     o.created_at as offer_created_at,
-    o.assign_order
+    o.assign_order,
+    true as has_offers
   from public.offers o
   join public.requests r on r.id = o.request_id
   join public.families f on f.id = r.requester_family_id
@@ -1181,7 +1195,8 @@ returns table (
   flexible_date boolean,
   flexible_start_time boolean,
   flexible_end_time boolean,
-  hours numeric
+  hours numeric,
+  has_offers boolean
 )
 language plpgsql
 security definer
@@ -1203,7 +1218,12 @@ begin
     r.flexible_date,
     r.flexible_start_time,
     r.flexible_end_time,
-    r.hours
+    r.hours,
+    exists (
+      select 1
+      from public.offers offer_lookup
+      where offer_lookup.request_id = r.id
+    ) as has_offers
   from public.requests r
   join public.families f on f.id = r.requester_family_id
   where (p_start_date is null or r.date >= p_start_date)
