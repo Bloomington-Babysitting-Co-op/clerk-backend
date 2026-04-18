@@ -175,7 +175,7 @@ create table public.ledger_entries (
   created_by uuid not null default auth.uid() references auth.users(id),
   constraint ledger_entries_from_or_to_check check (from_family_id is not null or to_family_id is not null),
   constraint ledger_entries_type_check check (
-    type = any (array['request'::text, 'ad hoc'::text, 'admin'::text])
+    type = any (array['request'::text, 'ad_hoc'::text, 'admin'::text])
   )
 );
 
@@ -2529,7 +2529,7 @@ begin
     raise exception 'From family and to family must be different';
   end if;
 
-  if p_type = 'ad hoc' and p_from_family_id IS DISTINCT FROM v_family_id then
+  if p_type = 'ad_hoc' and p_from_family_id IS DISTINCT FROM v_family_id then
     raise exception 'Entries must use your family as contributor';
   end if;
 
