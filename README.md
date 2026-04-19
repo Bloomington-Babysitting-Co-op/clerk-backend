@@ -11,7 +11,9 @@ npx supabase link --project-ref <your-project-ref>
 1. Clone this repo
 2. Install dependencies
    ```
-   npm install -upgrade
+   npm install -g npm-check-updates
+   ncu -u
+   npm install
    ```
 3. Ensure Docker Desktop is running
 4. Start the local Supabase stack
