@@ -154,12 +154,14 @@ create table public.offers (
   unique (request_id, family_id),
   constraint offers_assign_order_check check (
     assign_order is null or (assign_order between 1 and 3)
-  )
+  ),
+  constraint offers_request_assign_order_unique
+    unique (request_id, assign_order)
+    deferrable initially immediate
 );
 
 create index offers_request_id_idx on public.offers(request_id);
 create index offers_family_id_idx on public.offers(family_id);
-create unique index offers_request_assign_order_unique on public.offers(request_id, assign_order) where assign_order is not null;
 
 -- Table: ledger_entries stores hour transfers between families
 create table public.ledger_entries (
@@ -1971,7 +1973,7 @@ begin
         set assign_order = o.assign_order - 1
         where o.request_id = v_offer_request_id
           and o.assign_order > v_offer_assign_order
-        returning o.family_id, (o.assign_order + 1) as old_assign_order, o.assign_order as new_assign_order
+        returning o.family_id, o.assign_order
       )
       select * from reorder
     loop
@@ -1988,12 +1990,13 @@ begin
         perform public.rpc_send_email(
           v_rec.email,
           'email_my_offer_assigned',
-          'rpc_cancel_offer:reorder',
+          'rpc_cancel_offer',
           jsonb_build_object(
             'request_id', v_offer_request_id,
             'requester_family_name', public.rpc_family_name(v_requester_family_id),
-            'old_assign_order', v_offers.old_assign_order,
-            'new_assign_order', v_offers.new_assign_order
+            'action', 'reordered',
+            'assign_order', v_offers.assign_order,
+            'show_assign_order', true
           )
         );
       end loop;
@@ -2051,21 +2054,18 @@ as $$
 declare
   v_family_id uuid := public.rpc_my_family_id();
   v_offer_request_id uuid;
-  v_offer_family_id uuid;
-  v_offer_current_order integer;
   v_requester_family_id uuid;
   v_status text;
-  v_retainer_hours numeric;
+  v_max_assign_order integer;
+  v_cnt_assign_order integer;
+  v_assign_order integer;
+  v_offers record;
   v_rec record;
 begin
   perform public.rpc_refresh_request_statuses();
 
-  if p_assign_order is null or p_assign_order not between 1 and 3 then
-    raise exception 'Assign order must be between 1 and 3';
-  end if;
-
-  select o.request_id, o.family_id, o.assign_order
-  into v_offer_request_id, v_offer_family_id, v_offer_current_order
+  select o.request_id
+  into v_offer_request_id
   from public.offers o
   where o.id = p_offer_id;
 
@@ -2073,78 +2073,126 @@ begin
     raise exception 'Offer not found';
   end if;
 
-  if v_offer_current_order is not null then
-    raise exception 'Offer is already assigned';
-  end if;
-
-  select r.requester_family_id, r.status, r.retainer_hours
-  into v_requester_family_id, v_status, v_retainer_hours
+  -- Lock request row and read current assignment policy/state
+  select r.requester_family_id, r.status, case when r.retainer_hours > 0 then 3 else 1 end
+  into v_requester_family_id, v_status, v_max_assign_order
   from public.requests r
-  where r.id = v_offer_request_id;
+  where r.id = v_offer_request_id
+  for update;
+
+  if not found then
+    raise exception 'Request not found';
+  end if;
 
   if v_requester_family_id <> v_family_id then
     raise exception 'Only requester can assign offers';
   end if;
 
   if v_status not in ('offered', 'assigned') then
-    raise exception 'Request must have offers before assigning';
+    raise exception 'Request must be offered or assigned to assign offers';
   end if;
 
-  -- Secondary/tertiary require retainer_hours > 0
-  if p_assign_order > 1 and v_retainer_hours <= 0 then
-    raise exception 'Retainer hours must be set to assign backup sitters';
+  -- Serialize assignment mutations for this request
+
+  perform 1
+  from public.offers o
+  where o.request_id = v_offer_request_id
+  order by o.id
+  for update;
+
+  -- Re-read assignment state after locking to avoid stale validations
+  select o.assign_order
+  into v_assign_order
+  from public.offers o
+  where o.id = p_offer_id;
+
+  if not found then
+    raise exception 'Offer not found';
   end if;
 
-  -- Enforce sequential: cannot assign order N unless N-1 exists
-  if p_assign_order > 1 and not exists (
-    select 1 from public.offers o
-    where o.request_id = v_offer_request_id
-      and o.assign_order = p_assign_order - 1
-  ) then
-    raise exception 'Must assign previous priority slot first';
+  if p_assign_order = v_assign_order then
+    return; -- No-op if assigning to same slot. Avoid duplicate notifications.
   end if;
 
-  -- Check slot not already taken
-  if exists (
-    select 1 from public.offers o
-    where o.request_id = v_offer_request_id
-      and o.assign_order = p_assign_order
-  ) then
-    raise exception 'This priority slot is already assigned';
+  -- Validate slot range using assignment state read under lock
+  select count(*)
+  into v_cnt_assign_order
+  from public.offers o
+  where o.request_id = v_offer_request_id
+    and (o.id = p_offer_id or o.assign_order is not null);
+
+  if p_assign_order is null or p_assign_order not between 1 and least(v_max_assign_order, v_cnt_assign_order) then
+    raise exception 'Assign order must be between 1 and %', least(v_max_assign_order, v_cnt_assign_order);
   end if;
 
-  update public.offers
-  set assign_order = p_assign_order
-  where id = p_offer_id;
+  -- Set request status to assigned on first assignment
+  update public.requests
+  set status = 'assigned'
+  where id = v_offer_request_id
+    and status = 'offered';
 
-  -- Transition request to assigned on first assignment
-  if v_status = 'offered' then
-    update public.requests
-    set status = 'assigned'
-    where id = v_offer_request_id;
-  end if;
+  -- Defer unique constraint check until end of transaction to allow swapping assign_orders in a single update statement
+  set constraints "offers_request_assign_order_unique" deferred;
 
-  -- Notify users who opted into email_my_offer_assigned
-  for v_rec in
-    select u.email
-    from auth.users u
-    join public.family_parents fp on fp.user_id = u.id
-    join public.families f on f.id = fp.family_id
-    where fp.family_id = v_offer_family_id
-      and fp.email_my_offer_assigned = true
-      and f.is_active = true
+  for v_offers in
+    with rank as (
+      select
+        o.id,
+        o.family_id,
+        o.assign_order as old_assign_order,
+        row_number() over (order by case
+            -- Assign target offer to desired slot
+            when o.id = p_offer_id then p_assign_order
+            -- Move offers at or below new slot down if the offer is moving up
+            when p_assign_order > v_assign_order and o.assign_order <= p_assign_order then o.assign_order - 1
+            -- Move offers at or above new slot up otherwise
+            when o.assign_order >= p_assign_order then o.assign_order + 1
+            -- Keep offers not affected by the move in the same slot
+            else o.assign_order
+          end) as new_assign_order
+      from public.offers o
+      where o.request_id = v_offer_request_id
+        and (o.id = p_offer_id or o.assign_order is not null)
+    ), reorder as (
+      update public.offers o
+      set assign_order = case when r.new_assign_order > v_max_assign_order then null else r.new_assign_order end
+      from rank r
+      where o.id = r.id
+        and r.old_assign_order is distinct from r.new_assign_order
+      returning
+        o.family_id,
+        o.assign_order,
+        case
+          when r.old_assign_order is null then 'assigned'
+          when o.assign_order is null then 'unassigned'
+          else 'reordered'
+        end as action
+    )
+    select * from reorder
   loop
-    perform public.rpc_send_email(
-      v_rec.email,
-      'email_my_offer_assigned',
-      'rpc_assign_offer',
-      jsonb_build_object(
-        'request_id', v_offer_request_id,
-        'requester_family_name', public.rpc_family_name(v_requester_family_id),
-        'assign_order', p_assign_order,
-        'show_assign_order', (v_retainer_hours > 0)
-      )
-    );
+    -- Notify families whose assignment state changed
+    for v_rec in
+      select u.email
+      from auth.users u
+      join public.family_parents fp on fp.user_id = u.id
+      join public.families f on f.id = fp.family_id
+      where fp.family_id = v_offers.family_id
+        and fp.email_my_offer_assigned = true
+        and f.is_active = true
+    loop
+      perform public.rpc_send_email(
+        v_rec.email,
+        'email_my_offer_assigned',
+        'rpc_assign_offer',
+        jsonb_build_object(
+          'request_id', v_offer_request_id,
+          'requester_family_name', public.rpc_family_name(v_requester_family_id),
+          'action', v_offers.action,
+          'assign_order', v_offers.assign_order,
+          'show_assign_order', (v_offers.assign_order is not null and v_max_assign_order > 1)
+        )
+      );
+    end loop;
   end loop;
 end;
 $$;
@@ -2208,7 +2256,7 @@ begin
       set assign_order = o.assign_order - 1
       where o.request_id = v_offer_request_id
         and o.assign_order > v_offer_assign_order
-      returning o.family_id, (o.assign_order + 1) as old_assign_order, o.assign_order as new_assign_order
+      returning o.family_id, o.assign_order
     )
     select * from reorder
   loop
@@ -2225,12 +2273,13 @@ begin
       perform public.rpc_send_email(
         v_rec.email,
         'email_my_offer_assigned',
-        'rpc_unassign_offer:reorder',
+        'rpc_unassign_offer',
         jsonb_build_object(
           'request_id', v_offer_request_id,
           'requester_family_name', public.rpc_family_name(v_requester_family_id),
-          'old_assign_order', v_offers.old_assign_order,
-          'new_assign_order', v_offers.new_assign_order
+          'action', 'reordered',
+          'assign_order', v_offers.assign_order,
+          'show_assign_order', true
         )
       );
     end loop;
@@ -2267,147 +2316,12 @@ begin
       jsonb_build_object(
         'request_id', v_offer_request_id,
         'requester_family_name', public.rpc_family_name(v_requester_family_id),
+        'action', 'unassigned',
         'assign_order', v_offer_assign_order,
         'show_assign_order', false
       )
     );
   end loop;
-end;
-$$;
-
--- RPC: requester reorders an assigned offer to a different priority slot
-create or replace function public.rpc_reorder_offer(
-  p_offer_id uuid,
-  p_new_assign_order integer
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_family_id uuid := public.rpc_my_family_id();
-  v_offer_request_id uuid;
-  v_offer_family_id uuid;
-  v_offer_current_order integer;
-  v_requester_family_id uuid;
-  v_status text;
-  v_max_assign_order integer;
-  v_other_offer_id uuid;
-  v_other_offer_family_id uuid;
-  v_rec record;
-begin
-  perform public.rpc_refresh_request_statuses();
-
-  if p_new_assign_order is null or p_new_assign_order not between 1 and 3 then
-    raise exception 'Assign order must be between 1 and 3';
-  end if;
-
-  select o.request_id, o.family_id, o.assign_order
-  into v_offer_request_id, v_offer_family_id, v_offer_current_order
-  from public.offers o
-  where o.id = p_offer_id;
-
-  if v_offer_request_id is null then
-    raise exception 'Offer not found';
-  end if;
-
-  if v_offer_current_order is null then
-    raise exception 'Offer is not assigned';
-  end if;
-
-  if v_offer_current_order = p_new_assign_order then
-    return; -- no-op
-  end if;
-
-  select r.requester_family_id, r.status
-  into v_requester_family_id, v_status
-  from public.requests r
-  where r.id = v_offer_request_id;
-
-  if v_requester_family_id <> v_family_id then
-    raise exception 'Only requester can reorder offers';
-  end if;
-
-  if v_status <> 'assigned' then
-    raise exception 'Request must be assigned to reorder offers';
-  end if;
-
-  -- Find the offer currently at the target slot (if any) and swap
-  select o.id, o.family_id
-  into v_other_offer_id, v_other_offer_family_id
-  from public.offers o
-  where o.request_id = v_offer_request_id
-    and o.assign_order = p_new_assign_order;
-
-  if v_other_offer_id is not null then
-    -- Swap: temporarily set current to null to avoid unique constraint violation
-    update public.offers set assign_order = null where id = p_offer_id;
-    update public.offers set assign_order = v_offer_current_order where id = v_other_offer_id;
-    update public.offers set assign_order = p_new_assign_order where id = p_offer_id;
-  else
-    -- No offer at target slot: only allow filling the next higher-priority gap.
-    select max(o.assign_order)
-    into v_max_assign_order
-    from public.offers o
-    where o.request_id = v_offer_request_id
-      and o.assign_order is not null;
-
-    if p_new_assign_order <> v_offer_current_order - 1
-      or p_new_assign_order > coalesce(v_max_assign_order, 0) then
-      raise exception 'Cannot move to an empty slot unless it is the next higher-priority slot';
-    end if;
-
-    update public.offers set assign_order = p_new_assign_order where id = p_offer_id;
-  end if;
-
-  -- Notify moved family about priority change
-  for v_rec in
-    select u.email
-    from auth.users u
-    join public.family_parents fp on fp.user_id = u.id
-    join public.families f on f.id = fp.family_id
-    where fp.family_id = v_offer_family_id
-      and fp.email_my_offer_assigned = true
-      and f.is_active = true
-  loop
-    perform public.rpc_send_email(
-      v_rec.email,
-      'email_my_offer_assigned',
-      'rpc_reorder_offer',
-      jsonb_build_object(
-        'request_id', v_offer_request_id,
-        'requester_family_name', public.rpc_family_name(v_requester_family_id),
-        'old_assign_order', v_offer_current_order,
-        'new_assign_order', p_new_assign_order
-      )
-    );
-  end loop;
-
-  -- Notify swapped family if target slot was occupied
-  if v_other_offer_id is not null then
-    for v_rec in
-      select u.email
-      from auth.users u
-      join public.family_parents fp on fp.user_id = u.id
-      join public.families f on f.id = fp.family_id
-      where fp.family_id = v_other_offer_family_id
-        and fp.email_my_offer_assigned = true
-        and f.is_active = true
-    loop
-      perform public.rpc_send_email(
-        v_rec.email,
-        'email_my_offer_assigned',
-        'rpc_reorder_offer',
-        jsonb_build_object(
-          'request_id', v_offer_request_id,
-          'requester_family_name', public.rpc_family_name(v_requester_family_id),
-          'old_assign_order', p_new_assign_order,
-          'new_assign_order', v_offer_current_order
-        )
-      );
-    end loop;
-  end if;
 end;
 $$;
 
@@ -3092,7 +3006,6 @@ grant execute on function public.rpc_update_offer(uuid, text) to authenticated, 
 grant execute on function public.rpc_cancel_offer(uuid) to authenticated, service_role;
 grant execute on function public.rpc_assign_offer(uuid, integer) to authenticated, service_role;
 grant execute on function public.rpc_unassign_offer(uuid) to authenticated, service_role;
-grant execute on function public.rpc_reorder_offer(uuid, integer) to authenticated, service_role;
 
 -- Ledger
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
