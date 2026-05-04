@@ -125,6 +125,144 @@ function entryUrl(): string {
   return `${FRONTEND_URL}/entry-new`;
 }
 
+function chunk<T>(items: T[], size: number): T[][] {
+  const parts: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    parts.push(items.slice(i, i + size));
+  }
+  return parts;
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return toHex(new Uint8Array(digest));
+}
+
+async function buildBatchIdempotencyKey(
+  event: Record<string, unknown>,
+  batch: Array<{ from: string; to: string[]; subject: string; html: string }>,
+  batchIndex: number,
+): Promise<string> {
+  const type = String(event.type ?? 'unknown');
+  const source = String(event.source ?? 'unknown');
+  const queueId = typeof event.id === 'string' ? event.id : '';
+
+  // Prefer a stable key tied to the queue row id when available.
+  if (queueId) {
+    return `${type}/${source}/${queueId}/batch-${batchIndex}`.slice(0, 256);
+  }
+
+  // Fallback for transports that don't include row ids.
+  const digest = await sha256Hex(JSON.stringify({ type, source, batchIndex, batch }));
+  return `${type}/${source}/hash-${digest}`.slice(0, 256);
+}
+
+function parseJsonString(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return value;
+  }
+}
+
+function normalizeWebhookBody(rawBody: unknown): unknown {
+  let body = parseJsonString(rawBody);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+
+  const outer = body as Record<string, unknown>;
+
+  // Some transports wrap JSON in a `body` string.
+  if (typeof outer.body === 'string') {
+    body = parseJsonString(outer.body);
+  }
+
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  const normalized = body as Record<string, unknown>;
+
+  // Accept direct queue-row payloads in addition to documented webhook envelopes.
+  if (
+    normalized.record === undefined
+    && typeof normalized.type === 'string'
+    && typeof normalized.source === 'string'
+    && normalized.payload !== undefined
+  ) {
+    return {
+      type: 'INSERT',
+      table: 'email_queue',
+      schema: 'public',
+      record: normalized,
+      old_record: null,
+    };
+  }
+
+  return normalized;
+}
+
+function summarizeWebhookEvent(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return {
+      bodyType: Array.isArray(body) ? 'array' : typeof body,
+      recipientCount: 0,
+    };
+  }
+
+  const event = body as Record<string, unknown>;
+  const record = event.record && typeof event.record === 'object' && !Array.isArray(event.record)
+    ? event.record as Record<string, unknown>
+    : null;
+  const parsedQueuePayload = record && typeof record.payload === 'string'
+    ? parseJsonString(record.payload)
+    : record?.payload;
+  const payload = Array.isArray(parsedQueuePayload) ? parsedQueuePayload : [];
+
+  let recipientCount = 0;
+  let firstRecipient: Record<string, unknown> | null = null;
+  for (const item of payload) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    if (!firstRecipient) firstRecipient = row;
+    recipientCount += collectRecipientEmails(row).length;
+  }
+
+  const firstMeta = firstRecipient?.meta && typeof firstRecipient.meta === 'object' && !Array.isArray(firstRecipient.meta)
+    ? firstRecipient.meta as Record<string, unknown>
+    : null;
+
+  return {
+    webhookType: typeof event.type === 'string' ? event.type : null,
+    webhookTable: typeof event.table === 'string' ? event.table : null,
+    webhookSchema: typeof event.schema === 'string' ? event.schema : null,
+    queueId: typeof record?.id === 'string' ? record.id : null,
+    queueType: typeof record?.type === 'string' ? record.type : null,
+    queueSource: typeof record?.source === 'string' ? record.source : null,
+    recipientCount,
+    sampleRequestId: firstMeta?.request_id ?? null,
+    sampleLedgerId: firstMeta?.ledger_id ?? null,
+  };
+}
+
+function collectRecipientEmails(row: Record<string, unknown>): string[] {
+  const recipients: string[] = [];
+
+  const email = typeof row.email === 'string' ? row.email.trim() : '';
+  if (email) recipients.push(email);
+
+  if (Array.isArray(row.emails)) {
+    for (const value of row.emails) {
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed) recipients.push(trimmed);
+    }
+  }
+
+  return Array.from(new Set(recipients));
+}
+
 // ─── Template map ─────────────────────────────────────────────────────────────
 
 type Meta = Record<string, unknown> & { source: string };
@@ -450,78 +588,177 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
-Deno.serve(async (req) => {
+Deno.serve(async (req: Request) => {
   const webhookKeyHeader = req.headers.get('x-supabase-webhook-source') || '';
   if (!WEBHOOK_KEY || webhookKeyHeader !== WEBHOOK_KEY) {
     console.warn('send-email: unauthorized webhook request');
     return new Response('Unauthorized', { status: 401 });
   }
 
-  let payload = await req.json();
-
-  // Normalize/unpack common webhook shapes so they still arrive as the expected { email, type, source, meta } payload.
+  let rawBody: unknown;
   try {
-    if (payload && typeof payload === 'object') {
-      if (typeof payload.payload === 'string') {
-        try { payload = JSON.parse(payload.payload); } catch (_) { }
-      } else if (payload.record && (payload.record.email || payload.record.type || payload.record.source)) {
-        payload = payload.record;
-      } else if (payload.body && typeof payload.body === 'string') {
-        try { payload = JSON.parse(payload.body); } catch (_) { }
-      }
-    }
+    rawBody = await req.json();
   } catch (err) {
-    console.error('send-email: failed to normalize payload', err);
+    console.error('send-email: invalid JSON request body', err);
+    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  // Helpful debug log to inspect incoming shapes when troubleshooting
-  console.log('send-email received payload:', JSON.stringify(payload));
+  const eventBody = normalizeWebhookBody(rawBody);
 
-  // Accepts either a direct {to, subject, html} call (existing usage)
-  // or a webhook trigger payload {email, type, source, meta}
-  let to: string;
-  let subject: string;
-  let html: string;
+  // Keep logs useful for troubleshooting without printing recipient email/meta payloads.
+  console.log('send-email received summary:', JSON.stringify(summarizeWebhookEvent(eventBody)));
 
-  if (payload.email && payload.type && payload.source) {
-    // Called from webhook trigger on public.email_queue
-    const { email, type, source, meta = {} } = payload;
-    const template = templates[type];
-    if (!template) {
-      return new Response(JSON.stringify({ error: `Unknown email type: ${type}` }), {
+  if (!eventBody || typeof eventBody !== 'object') {
+    return new Response(JSON.stringify({ error: 'Invalid payload. Expected an object body.' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const webhookEvent = eventBody as Record<string, unknown>;
+  if (
+    typeof webhookEvent.type !== 'string'
+    || typeof webhookEvent.table !== 'string'
+    || typeof webhookEvent.schema !== 'string'
+    || !webhookEvent.record
+    || typeof webhookEvent.record !== 'object'
+    || Array.isArray(webhookEvent.record)
+  ) {
+    return new Response(JSON.stringify({
+      error: 'Invalid payload. Expected Supabase webhook shape { type, table, schema, record, old_record }',
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const queueEvent = webhookEvent.record as Record<string, unknown>;
+  if (typeof queueEvent.payload === 'string') {
+    queueEvent.payload = parseJsonString(queueEvent.payload);
+  }
+
+  if (!queueEvent.type || !queueEvent.source || !Array.isArray(queueEvent.payload)) {
+    return new Response(JSON.stringify({
+      error: 'Invalid webhook record. Expected record.{ type, source, payload: recipient[] }',
+    }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const type = String(queueEvent.type);
+  const source = String(queueEvent.source);
+  const recipients = queueEvent.payload as unknown[];
+  const template = templates[type];
+
+  if (!template) {
+    return new Response(JSON.stringify({ error: `Unknown email type: ${type}` }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const emails: Array<{ from: string; to: string[]; subject: string; html: string }> = [];
+  let recipientCount = 0;
+  for (let i = 0; i < recipients.length; i += 1) {
+    const recipient = recipients[i];
+    if (!recipient || typeof recipient !== 'object' || Array.isArray(recipient)) {
+      return new Response(JSON.stringify({ error: `Invalid recipient at index ${i}: expected object` }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
     }
-    // Merge `source` into the meta object so templates can reference it
-    const mergedMeta: Meta = { ...(meta ?? {}), source };
+
+    const row = recipient as Record<string, unknown>;
+    const recipientEmails = collectRecipientEmails(row);
+    if (recipientEmails.length === 0) {
+      return new Response(JSON.stringify({ error: `Invalid recipient at index ${i}: missing email(s)` }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    const rowMeta = row.meta;
+    const metaObj = rowMeta && typeof rowMeta === 'object' && !Array.isArray(rowMeta)
+      ? rowMeta as Record<string, unknown>
+      : {};
+
+    const mergedMeta: Meta = { ...metaObj, source };
     const rendered = template(mergedMeta);
-    to = email;
-    subject = rendered.subject;
-    html = rendered.html;
-  } else {
-    // Direct call with pre-built content
-    to = payload.to;
-    subject = payload.subject;
-    html = payload.html;
+
+    // Resend supports up to 50 recipients in the to[] list for a single message.
+    const recipientGroups = chunk(recipientEmails, 50);
+    for (const toList of recipientGroups) {
+      emails.push({
+        from: RESEND_FROM_EMAIL,
+        to: toList,
+        subject: rendered.subject,
+        html: rendered.html,
+      });
+      recipientCount += toList.length;
+    }
   }
 
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${RESEND_API_KEY}`,
-    },
-    body: JSON.stringify({
-      from: RESEND_FROM_EMAIL,
-      to,
-      subject,
-      html,
-    }),
-  });
+  if (emails.length === 0) {
+    return new Response(JSON.stringify({ data: [], count: 0, messages: 0, batches: 0 }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
 
-  const data = await res.json();
-  return new Response(JSON.stringify(data), {
+  const batches = chunk(emails, 100);
+  const sent: unknown[] = [];
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batch = batches[batchIndex];
+    const idempotencyKey = await buildBatchIdempotencyKey(queueEvent, batch, batchIndex);
+
+    const res = await fetch('https://api.resend.com/emails/batch', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Idempotency-Key': idempotencyKey,
+      },
+      body: JSON.stringify(batch),
+    });
+
+    const raw = await res.text();
+    let data: unknown = null;
+    if (raw) {
+      try {
+        data = JSON.parse(raw);
+      } catch (_err) {
+        data = { raw };
+      }
+    }
+
+    if (!res.ok) {
+      return new Response(JSON.stringify({
+        error: 'Resend batch send failed',
+        status: res.status,
+        details: data,
+      }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (data && typeof data === 'object' && Array.isArray((data as Record<string, unknown>).data)) {
+      sent.push(...((data as Record<string, unknown>).data as unknown[]));
+    } else if (data !== null) {
+      sent.push(data);
+    }
+  }
+
+  return new Response(JSON.stringify({
+    data: sent,
+    count: recipientCount,
+    messages: emails.length,
+    batches: batches.length,
+  }), {
     headers: { 'Content-Type': 'application/json' },
   });
 });
