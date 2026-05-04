@@ -486,132 +486,138 @@ set search_path = public
 as $$
 declare
   v_today date := public.rpc_local_today();
+  v_expired_payload jsonb;
+  v_ignored integer;
 begin
   -- Expire requests that are past and were never assigned
+  with expired as (
+    update public.requests r
+    set status = 'expired'
+    where r.date < v_today
+      and r.status in ('open', 'offered')
+    returning r.id, r.requester_family_id
+  )
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'email', u.email,
+        'meta', jsonb_build_object(
+          'request_id', e.id
+        )
+      )
+    ),
+    '[]'::jsonb
+  )
+  into v_expired_payload
+  from expired e
+  join public.family_parents fp on fp.family_id = e.requester_family_id
+  join public.families f on f.id = fp.family_id
+  join auth.users u on u.id = fp.user_id
+  where fp.email_my_request_expired = true
+    and f.is_active = true;
+
   perform public.rpc_send_email(
     'email_my_request_expired',
     'rpc_refresh_request_statuses',
-    coalesce((
-      with expired as (
-        update public.requests r
-        set status = 'expired'
-        where r.date < v_today
-          and r.status in ('open', 'offered')
-        returning r.id, r.requester_family_id
-      )
-      select jsonb_agg(
-        jsonb_build_object(
-          'email', u.email,
-          'meta', jsonb_build_object(
-            'request_id', e.id
-          )
-        )
-      )
-      from expired e
-      join public.family_parents fp on fp.family_id = e.requester_family_id
-      join public.families f on f.id = fp.family_id
-      join auth.users u on u.id = fp.user_id
-      where fp.email_my_request_expired = true
-        and f.is_active = true
-    ), '[]'::jsonb)
+    v_expired_payload
   );
 
   -- Close requests that are past and were assigned, then batch related emails and retainer ledger effects.
-  perform
-    with completed as (
-      update public.requests r
-      set status = 'completed'
-      where r.date < v_today
-        and r.status = 'assigned'
-      returning r.id, r.requester_family_id, r.date, r.retainer_hours
-    ), completion_email_payload as (
-      select coalesce(
-        jsonb_agg(
-          jsonb_build_object(
-            'email', u.email,
-            'meta', jsonb_build_object(
-              'request_id', c.id,
-              'requester_family_name', public.rpc_family_name(c.requester_family_id),
-              'assign_order', o.assign_order,
-              'show_assign_order', (c.retainer_hours > 0)
-            )
+  with completed as (
+    update public.requests r
+    set status = 'completed'
+    where r.date < v_today
+      and r.status = 'assigned'
+    returning r.id, r.requester_family_id, r.date, r.retainer_hours
+  ), completion_email_payload as (
+    select coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'email', u.email,
+          'meta', jsonb_build_object(
+            'request_id', c.id,
+            'requester_family_name', public.rpc_family_name(c.requester_family_id),
+            'assign_order', o.assign_order,
+            'show_assign_order', (c.retainer_hours > 0)
           )
-        ),
-        '[]'::jsonb
-      ) as payload
-      from completed c
-      join public.offers o on o.request_id = c.id
-      join public.family_parents fp on fp.family_id = o.family_id
-      join public.families f on f.id = fp.family_id
-      join auth.users u on u.id = fp.user_id
-      where o.assign_order is not null
-        and fp.email_my_offer_completed = true
-        and f.is_active = true
-    ), send_completion_email as (
-      select public.rpc_send_email(
-        'email_my_offer_completed',
-        'rpc_refresh_request_statuses',
-        payload
-      )
-      from completion_email_payload
-    ), inserted_ledger as (
-      insert into public.ledger_entries (
-        from_family_id,
-        to_family_id,
-        type,
-        date,
-        hours,
-        notes,
-        request_id,
-        created_by
-      )
-      select
-        c.requester_family_id,
-        o.family_id,
-        'request',
-        c.date,
-        c.retainer_hours,
-        'Retainer hours (backup sitter)',
-        c.id,
-        (select id from auth.users where email = 'automation@bbc.clerk')
-      from completed c
-      join public.offers o on o.request_id = c.id
-      where c.retainer_hours > 0
-        and o.assign_order is not null
-        and o.assign_order > 1
-      returning id, from_family_id, to_family_id, hours
-    ), ledger_email_payload as (
-      select coalesce(
-        jsonb_agg(
-          jsonb_build_object(
-            'email', u.email,
-            'meta', jsonb_build_object(
-              'ledger_id', il.id,
-              'hours_delta', case when fp.family_id = il.from_family_id then -il.hours else il.hours end,
-              'current_balance', public.rpc_hours_balance_as_of(fp.family_id, v_today),
-              'author_email', 'automation@bbc.clerk'
-            )
-          )
-        ),
-        '[]'::jsonb
-      ) as payload
-      from inserted_ledger il
-      join public.family_parents fp on fp.family_id in (il.from_family_id, il.to_family_id)
-      join public.families f on f.id = fp.family_id
-      join auth.users u on u.id = fp.user_id
-      where fp.email_ledger_change = true
-        and f.is_active = true
-    ), send_ledger_email as (
-      select public.rpc_send_email(
-        'email_ledger_change',
-        'rpc_refresh_request_statuses',
-        payload
-      )
-      from ledger_email_payload
+        )
+      ),
+      '[]'::jsonb
+    ) as payload
+    from completed c
+    join public.offers o on o.request_id = c.id
+    join public.family_parents fp on fp.family_id = o.family_id
+    join public.families f on f.id = fp.family_id
+    join auth.users u on u.id = fp.user_id
+    where o.assign_order is not null
+      and fp.email_my_offer_completed = true
+      and f.is_active = true
+  ), send_completion_email as (
+    select public.rpc_send_email(
+      'email_my_offer_completed',
+      'rpc_refresh_request_statuses',
+      payload
     )
-    select 1
-    from send_completion_email
-    cross join send_ledger_email;
+    from completion_email_payload
+  ), inserted_ledger as (
+    insert into public.ledger_entries (
+      from_family_id,
+      to_family_id,
+      type,
+      date,
+      hours,
+      notes,
+      request_id,
+      created_by
+    )
+    select
+      c.requester_family_id,
+      o.family_id,
+      'request',
+      c.date,
+      c.retainer_hours,
+      'Retainer hours (backup sitter)',
+      c.id,
+      (select id from auth.users where email = 'automation@bbc.clerk')
+    from completed c
+    join public.offers o on o.request_id = c.id
+    where c.retainer_hours > 0
+      and o.assign_order is not null
+      and o.assign_order > 1
+    returning id, from_family_id, to_family_id, hours
+  ), ledger_email_payload as (
+    select coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'email', u.email,
+          'meta', jsonb_build_object(
+            'ledger_id', il.id,
+            'hours_delta', case when fp.family_id = il.from_family_id then -il.hours else il.hours end,
+            'current_balance', public.rpc_hours_balance_as_of(fp.family_id, v_today),
+            'author_email', 'automation@bbc.clerk'
+          )
+        )
+      ),
+      '[]'::jsonb
+    ) as payload
+    from inserted_ledger il
+    join public.family_parents fp on fp.family_id in (il.from_family_id, il.to_family_id)
+    join public.families f on f.id = fp.family_id
+    join auth.users u on u.id = fp.user_id
+    where fp.email_ledger_change = true
+      and f.is_active = true
+  ), send_ledger_email as (
+    select public.rpc_send_email(
+      'email_ledger_change',
+      'rpc_refresh_request_statuses',
+      payload
+    )
+    from ledger_email_payload
+  )
+  select 1
+  into v_ignored
+  from send_completion_email
+  cross join send_ledger_email;
 end;
 $$;
 
@@ -2036,6 +2042,7 @@ declare
   v_offer_assign_order integer;
   v_requester_family_id uuid;
   v_request_status text;
+  v_reorder_payload jsonb;
   v_offers record;
   v_rec record;
 begin
@@ -2069,36 +2076,40 @@ begin
   -- Compact remaining assign_orders if the cancelled offer was assigned
   if v_offer_assign_order is not null then
     -- Notify families whose assignment priority changed due to compaction
+    with reorder as (
+      update public.offers o
+      set assign_order = o.assign_order - 1
+      where o.request_id = v_offer_request_id
+        and o.assign_order > v_offer_assign_order
+      returning o.family_id, o.assign_order
+    )
+    select coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'email', u.email,
+          'meta', jsonb_build_object(
+            'request_id', v_offer_request_id,
+            'requester_family_name', public.rpc_family_name(v_requester_family_id),
+            'action', 'reordered',
+            'assign_order', r.assign_order,
+            'show_assign_order', true
+          )
+        )
+      ),
+      '[]'::jsonb
+    )
+    into v_reorder_payload
+    from reorder r
+    join public.family_parents fp on fp.family_id = r.family_id
+    join public.families f on f.id = fp.family_id
+    join auth.users u on u.id = fp.user_id
+    where fp.email_my_offer_assigned = true
+      and f.is_active = true;
+
     perform public.rpc_send_email(
       'email_my_offer_assigned',
       'rpc_cancel_offer',
-      coalesce((
-        with reorder as (
-          update public.offers o
-          set assign_order = o.assign_order - 1
-          where o.request_id = v_offer_request_id
-            and o.assign_order > v_offer_assign_order
-          returning o.family_id, o.assign_order
-        )
-        select jsonb_agg(
-          jsonb_build_object(
-            'email', u.email,
-            'meta', jsonb_build_object(
-              'request_id', v_offer_request_id,
-              'requester_family_name', public.rpc_family_name(v_requester_family_id),
-              'action', 'reordered',
-              'assign_order', r.assign_order,
-              'show_assign_order', true
-            )
-          )
-        )
-        from reorder r
-        join public.family_parents fp on fp.family_id = r.family_id
-        join public.families f on f.id = fp.family_id
-        join auth.users u on u.id = fp.user_id
-        where fp.email_my_offer_assigned = true
-          and f.is_active = true
-      ), '[]'::jsonb)
+      v_reorder_payload
     );
   end if;
 
@@ -2315,6 +2326,7 @@ declare
   v_offer_assign_order integer;
   v_requester_family_id uuid;
   v_status text;
+  v_reorder_payload jsonb;
   v_offers record;
   v_rec record;
 begin
@@ -2353,36 +2365,40 @@ begin
 
   -- Compact remaining assign_orders
   -- Notify families whose assignment priority changed due to compaction
+  with reorder as (
+    update public.offers o
+    set assign_order = o.assign_order - 1
+    where o.request_id = v_offer_request_id
+      and o.assign_order > v_offer_assign_order
+    returning o.family_id, o.assign_order
+  )
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'email', u.email,
+        'meta', jsonb_build_object(
+          'request_id', v_offer_request_id,
+          'requester_family_name', public.rpc_family_name(v_requester_family_id),
+          'action', 'reordered',
+          'assign_order', r.assign_order,
+          'show_assign_order', true
+        )
+      )
+    ),
+    '[]'::jsonb
+  )
+  into v_reorder_payload
+  from reorder r
+  join public.family_parents fp on fp.family_id = r.family_id
+  join public.families f on f.id = fp.family_id
+  join auth.users u on u.id = fp.user_id
+  where fp.email_my_offer_assigned = true
+    and f.is_active = true;
+
   perform public.rpc_send_email(
     'email_my_offer_assigned',
     'rpc_unassign_offer',
-    coalesce((
-      with reorder as (
-        update public.offers o
-        set assign_order = o.assign_order - 1
-        where o.request_id = v_offer_request_id
-          and o.assign_order > v_offer_assign_order
-        returning o.family_id, o.assign_order
-      )
-      select jsonb_agg(
-        jsonb_build_object(
-          'email', u.email,
-          'meta', jsonb_build_object(
-            'request_id', v_offer_request_id,
-            'requester_family_name', public.rpc_family_name(v_requester_family_id),
-            'action', 'reordered',
-            'assign_order', r.assign_order,
-            'show_assign_order', true
-          )
-        )
-      )
-      from reorder r
-      join public.family_parents fp on fp.family_id = r.family_id
-      join public.families f on f.id = fp.family_id
-      join auth.users u on u.id = fp.user_id
-      where fp.email_my_offer_assigned = true
-        and f.is_active = true
-    ), '[]'::jsonb)
+    v_reorder_payload
   );
 
   -- Revert request status if no more assigned offers
