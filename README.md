@@ -42,7 +42,7 @@ npx supabase link --project-ref <your-project-ref>
    * This is to make the send-email edge function work
 6. Link Supabase to Resend in the [Resend Integrations dashboard](https://resend.com/settings/integrations)
    * This is to make integrated auth api emails work (reset password, etc)
-7. Open the [Supabase Edge Functions Secrets dashboard](https://supabase.com/dashboard/project/_/functions/secrets) and add `FRONTEND_URL`, `RESEND_FROM_URL`, `RESEND_API_KEY` and `WEBHOOK_KEY` with remote values from `.env`
+7. Open the [Supabase Edge Functions Secrets dashboard](https://supabase.com/dashboard/project/_/functions/secrets) and add `FRONTEND_URL`, `RESEND_FROM_EMAIL`, `RESEND_API_KEY` and `WEBHOOK_KEY` with remote values from `.env`
 8. Open the [Supabase Webhooks dashboard](https://supabase.com/dashboard/project/_/integrations/webhooks/webhooks) and click `Create a new hook`
    * Name: `send-email-queue`
    * Table: `public email_queue`
