@@ -2953,6 +2953,17 @@ begin
 end;
 $$;
 
+-- Security: enable RLS on all app tables
+alter table if exists public.site_settings enable row level security;
+alter table if exists public.families enable row level security;
+alter table if exists public.family_parents enable row level security;
+alter table if exists public.family_children enable row level security;
+alter table if exists public.requests enable row level security;
+alter table if exists public.request_children enable row level security;
+alter table if exists public.offers enable row level security;
+alter table if exists public.ledger_entries enable row level security;
+alter table if exists public.email_queue enable row level security;
+
 -- Security: enforce RPC-only access for anon/authenticated
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
