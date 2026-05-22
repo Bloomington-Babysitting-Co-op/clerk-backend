@@ -2174,6 +2174,7 @@ declare
   v_max_assign_order integer;
   v_cnt_assign_order integer;
   v_assign_order integer;
+  v_assigned_payload jsonb;
   v_offers record;
   v_rec record;
 begin
@@ -2250,62 +2251,63 @@ begin
   set constraints "offers_request_assign_order_unique" deferred;
 
   -- Notify families whose assignment state changed
+  with rank as (
+    select
+      o.id,
+      o.family_id,
+      o.assign_order as old_assign_order,
+      row_number() over (order by case
+          -- Assign target offer to desired slot
+          when o.id = p_offer_id then p_assign_order
+          -- Move offers at or below new slot down if the offer is moving up
+          when p_assign_order > v_assign_order and o.assign_order <= p_assign_order then o.assign_order - 1
+          -- Move offers at or above new slot up otherwise
+          when o.assign_order >= p_assign_order then o.assign_order + 1
+          -- Keep offers not affected by the move in the same slot
+          else o.assign_order
+        end) as new_assign_order
+    from public.offers o
+    where o.request_id = v_offer_request_id
+      and (o.id = p_offer_id or o.assign_order is not null)
+  ), reorder as (
+    update public.offers o
+    set assign_order = case when r.new_assign_order > v_max_assign_order then null else r.new_assign_order end
+    from rank r
+    where o.id = r.id
+      and r.old_assign_order is distinct from r.new_assign_order
+    returning
+      o.family_id,
+      o.assign_order,
+      case
+        when r.old_assign_order is null then 'assigned'
+        when o.assign_order is null then 'unassigned'
+        else 'reordered'
+      end as action
+  )
+  select coalesce(jsonb_agg(
+    jsonb_build_object(
+      'email', u.email,
+      'meta', jsonb_build_object(
+        'request_id', v_offer_request_id,
+        'requester_family_name', public.rpc_family_name(v_requester_family_id),
+        'action', r.action,
+        'assign_order', r.assign_order,
+        'show_assign_order', (r.assign_order is not null and v_max_assign_order > 1)
+      )
+    )
+  ), '[]'::jsonb)
+  into v_assigned_payload
+  from reorder r
+  join public.family_parents fp on fp.family_id = r.family_id
+  join public.families f on f.id = fp.family_id
+  join auth.users u on u.id = fp.user_id
+  where fp.email_my_offer_assigned = true
+    and f.is_active = true;
+
   perform public.rpc_send_email(
     'email_my_offer_assigned',
     'rpc_assign_offer',
-    coalesce((
-      with rank as (
-        select
-          o.id,
-          o.family_id,
-          o.assign_order as old_assign_order,
-          row_number() over (order by case
-              -- Assign target offer to desired slot
-              when o.id = p_offer_id then p_assign_order
-              -- Move offers at or below new slot down if the offer is moving up
-              when p_assign_order > v_assign_order and o.assign_order <= p_assign_order then o.assign_order - 1
-              -- Move offers at or above new slot up otherwise
-              when o.assign_order >= p_assign_order then o.assign_order + 1
-              -- Keep offers not affected by the move in the same slot
-              else o.assign_order
-            end) as new_assign_order
-        from public.offers o
-        where o.request_id = v_offer_request_id
-          and (o.id = p_offer_id or o.assign_order is not null)
-      ), reorder as (
-        update public.offers o
-        set assign_order = case when r.new_assign_order > v_max_assign_order then null else r.new_assign_order end
-        from rank r
-        where o.id = r.id
-          and r.old_assign_order is distinct from r.new_assign_order
-        returning
-          o.family_id,
-          o.assign_order,
-          case
-            when r.old_assign_order is null then 'assigned'
-            when o.assign_order is null then 'unassigned'
-            else 'reordered'
-          end as action
-      )
-      select jsonb_agg(
-        jsonb_build_object(
-          'email', u.email,
-          'meta', jsonb_build_object(
-            'request_id', v_offer_request_id,
-            'requester_family_name', public.rpc_family_name(v_requester_family_id),
-            'action', r.action,
-            'assign_order', r.assign_order,
-            'show_assign_order', (r.assign_order is not null and v_max_assign_order > 1)
-          )
-        )
-      )
-      from reorder r
-      join public.family_parents fp on fp.family_id = r.family_id
-      join public.families f on f.id = fp.family_id
-      join auth.users u on u.id = fp.user_id
-      where fp.email_my_offer_assigned = true
-        and f.is_active = true
-    ), '[]'::jsonb)
+    v_assigned_payload
   );
 end;
 $$;
@@ -3100,8 +3102,7 @@ revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
 revoke all on all functions in schema public from anon, authenticated;
 
-grant usage on schema public to anon, authenticated;
-grant usage on schema public to service_role;
+grant usage on schema public to authenticated, service_role;
 
 grant all on all tables in schema public to service_role;
 grant all on all sequences in schema public to service_role;
