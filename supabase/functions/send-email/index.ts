@@ -690,7 +690,7 @@ Deno.serve(async (req: Request) => {
     const rendered = template(mergedMeta);
 
     // Resend supports up to 50 recipients in the to[] list for a single message.
-    const recipientGroups = chunk(recipientEmails, 50);
+    const recipientGroups = chunk(recipientEmails, 1);
     for (const toList of recipientGroups) {
       emails.push({
         from: RESEND_FROM_EMAIL,
