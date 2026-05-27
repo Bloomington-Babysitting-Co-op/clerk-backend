@@ -572,18 +572,24 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
   },
 
   // A request you were assigned to has been completed
-  email_my_offer_completed: (meta) => ({
-    subject: 'Request marked as completed',
-    html: layout(`
-      ${heading('Request completed')}
-      ${body(`You were assigned${assignLabel(meta.assign_order, meta.show_assign_order)} to a request by the <strong>${meta.requester_family_name}</strong> family that has been marked as completed.`)}
-      ${btn(requestViewUrl(meta.request_id), 'View request')}
-      ${Number(meta.assign_order) === 1
-        ? `${btn(entryUrl(), 'Submit ledger entry')}
-      ${muted('Log in to create a ledger entry and record the hours.')}`
-        : muted('A ledger entry has been automatically recorded for your retainer hours.')}
-    `),
-  })
+  email_my_offer_completed: (meta) => {
+    const action = ({
+      rpc_refresh_request_statuses: 'marked as completed',
+      cron_refresh_request_statuses: 'missing a ledger entry'
+    } as Record<string,string>)[meta.source] ?? 'ready for a ledger entry';
+    return {
+      subject: `Request ${action}`,
+      html: layout(`
+        ${heading('Request completed')}
+        ${body(`You were assigned${assignLabel(meta.assign_order, meta.show_assign_order)} to a request by the <strong>${meta.requester_family_name}</strong> family that is ${action}.`)}
+        ${btn(requestViewUrl(meta.request_id), 'View request')}
+        ${Number(meta.assign_order) === 1
+          ? `${btn(entryUrl(), 'Submit ledger entry')}
+        ${muted('Log in to create a ledger entry and record the hours.')}`
+          : muted('A ledger entry has been automatically recorded for your retainer hours.')}
+      `),
+    };
+  }
 };
 
 // ─── Handler ──────────────────────────────────────────────────────────────────

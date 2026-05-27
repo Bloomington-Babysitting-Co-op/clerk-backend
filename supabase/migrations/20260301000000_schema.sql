@@ -3319,6 +3319,51 @@ begin
     ), '[]'::jsonb)
   );
 
+  -- Notify users who opted into email_my_offer_completed
+  if v_today = (v_month_start + interval '1 month' - interval '2 days')::date then
+    perform public.rpc_send_email(
+      'email_my_offer_completed',
+      'cron_refresh_request_statuses',
+      coalesce((
+        select jsonb_agg(
+          jsonb_build_object(
+            'email', q.email,
+            'meta', jsonb_build_object(
+              'request_id', q.id,
+              'requester_family_name', public.rpc_family_name(q.requester_family_id),
+              'assign_order', q.assign_order,
+              'show_assign_order', (q.retainer_hours > 0)
+            )
+          )
+        )
+        from (
+          select
+            u.email,
+            r.id,
+            r.requester_family_id,
+            o.assign_order,
+            r.retainer_hours
+          from auth.users u
+          join public.family_parents fp on fp.user_id = u.id
+          join public.families f on f.id = fp.family_id
+          join public.offers o on o.family_id = fp.family_id
+          join public.requests r on r.id = o.request_id
+          where o.assign_order = 1
+            and r.date >= v_month_start
+            and r.status = 'completed'
+            and not exists (
+              select 1
+              from public.ledger_entries le
+              where le.request_id = r.id
+                and le.to_family_id = fp.family_id
+            )
+            and fp.email_my_offer_completed = true
+            and f.is_active = true
+        ) as q
+      ), '[]'::jsonb)
+    );
+  end if;
+
   -- Notify users who opted into email_endmonth_summary
   if v_today = v_month_start then
     perform public.rpc_send_email(
