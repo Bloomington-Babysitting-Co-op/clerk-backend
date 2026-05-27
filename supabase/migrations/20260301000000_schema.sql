@@ -47,19 +47,19 @@ create table public.family_parents (
   family_id uuid not null references public.families(id) on delete cascade,
   name text,
   phone text,
-  email_endmonth_summary boolean not null default false,
-  email_midmonth_inactive boolean not null default false,
-  email_ledger_change boolean not null default false,
-  email_other_request_new boolean not null default false,
+  email_endmonth_summary boolean not null default true,
+  email_midmonth_inactive boolean not null default true,
+  email_ledger_change boolean not null default true,
+  email_other_request_new boolean not null default true,
   email_other_request_unoffered boolean not null default false,
   email_other_request_expiring boolean not null default false,
-  email_my_request_offered boolean not null default false,
+  email_my_request_offered boolean not null default true,
   email_my_request_unoffered boolean not null default false,
   email_my_request_expiring boolean not null default false,
   email_my_request_expired boolean not null default false,
-  email_my_offer_assigned boolean not null default false,
-  email_my_offer_change boolean not null default false,
-  email_my_offer_completed boolean not null default false
+  email_my_offer_assigned boolean not null default true,
+  email_my_offer_change boolean not null default true,
+  email_my_offer_completed boolean not null default true
 );
 
 create index family_parents_family_idx on public.family_parents(family_id);
