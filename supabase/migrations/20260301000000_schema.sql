@@ -395,18 +395,27 @@ as $$
 $$;
 
 -- Function: check if a family has any ledger entries in the current month
-create or replace function public.rpc_active_this_month(p_family_id uuid)
+create or replace function public.rpc_active_this_month(
+  p_family_id uuid,
+  p_date date default public.rpc_local_today()
+)
 returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
+  with d as (
+    select date_trunc('month', p_date)::date as month_start,
+      (date_trunc('month', p_date) + interval '1 month - 1 day')::date as month_end
+  )
   select exists (
     select 1
     from public.ledger_entries le
-    where le.date >= public.rpc_local_month_start()
-      and p_family_id in (le.from_family_id, le.to_family_id)
+    cross join d
+    where p_family_id in (le.from_family_id, le.to_family_id)
+      and le.date between d.month_start and d.month_end
+      and le.type <> 'admin'
   );
 $$;
 
@@ -2453,6 +2462,7 @@ create or replace function public.rpc_list_ledger_balances()
 returns table (
   name text,
   active_this_month boolean,
+  active_prior_month boolean,
   hours_balance numeric,
   month_start_balance numeric,
   prior_month_start_balance numeric
@@ -2470,7 +2480,8 @@ as $$
   )
   select
     f.name,
-    public.rpc_active_this_month(f.id) as active_this_month,
+    public.rpc_active_this_month(f.id, d.today) as active_this_month,
+    public.rpc_active_this_month(f.id, d.prior_month_end) as active_prior_month,
     public.rpc_hours_balance_as_of(f.id, d.today) as hours_balance,
     public.rpc_hours_balance_as_of(f.id, d.prior_month_end) as month_start_balance,
     public.rpc_hours_balance_as_of(f.id, d.two_prior_month_end) as prior_month_start_balance
@@ -3205,7 +3216,7 @@ begin
         join public.requests r on r.requester_family_id <> fp.family_id
           and not exists (select 1 from public.offers o where o.request_id = r.id and o.family_id = fp.family_id)
         where r.status = 'open'
-          and (r.created_at at time zone 'America/Chicago')::date = (v_today - interval '3 days')::date
+          and (r.created_at at time zone 'America/Chicago')::date = (v_today - interval '3 day')::date
           and fp.email_other_request_unoffered = true
           and f.is_active = true
       ) as q
@@ -3246,7 +3257,7 @@ begin
               ) < 3
             )
           )
-          and r.date = (v_today + interval '2 days')::date
+          and r.date = (v_today + interval '2 day')::date
           and fp.email_other_request_expiring = true
           and f.is_active = true
       ) as q
@@ -3273,7 +3284,7 @@ begin
         join public.families f on f.id = fp.family_id
         join public.requests r on r.requester_family_id = fp.family_id
         where r.status = 'open'
-          and (r.created_at at time zone 'America/Chicago')::date = (v_today - interval '3 days')::date
+          and (r.created_at at time zone 'America/Chicago')::date = (v_today - interval '3 day')::date
           and fp.email_my_request_unoffered = true
           and f.is_active = true
       ) as q
@@ -3312,7 +3323,7 @@ begin
               ) < 3
             )
           )
-          and r.date = (v_today + interval '2 days')::date
+          and r.date = (v_today + interval '2 day')::date
           and fp.email_my_request_expiring = true
           and f.is_active = true
       ) as q
@@ -3320,7 +3331,7 @@ begin
   );
 
   -- Notify users who opted into email_my_offer_completed
-  if v_today = (v_month_start + interval '1 month' - interval '2 days')::date then
+  if v_today = (v_month_start + interval '1 month - 2 day')::date then
     perform public.rpc_send_email(
       'email_my_offer_completed',
       'cron_refresh_request_statuses',
@@ -3392,7 +3403,7 @@ begin
   end if;
 
   -- Notify users who opted into email_midmonth_inactive
-  if v_today = (v_month_start + interval '15 days')::date then
+  if v_today = (v_month_start + interval '15 day')::date then
     perform public.rpc_send_email(
       'email_midmonth_inactive',
       'cron_refresh_request_statuses',
