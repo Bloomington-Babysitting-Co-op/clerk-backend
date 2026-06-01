@@ -1226,7 +1226,9 @@ as $$
     case when id = me.family_id then true else false end as is_my_family
   from public.families
   cross join me
-  order by name, admin_date_joined;
+  order by
+    name,
+    admin_date_joined;
 $$;
 
 -- RPC: list full family card details for families page
@@ -1297,7 +1299,9 @@ as $$
   left join parent_json pj on pj.family_id = f.id
   left join child_json cj on cj.family_id = f.id
   where f.is_active = true
-  order by f.name, f.admin_date_joined;
+  order by
+    f.name,
+    f.admin_date_joined;
 $$;
 
 -- RPC: list requests with optional date filters
@@ -2532,7 +2536,9 @@ as $$
   where (p_start_date is null or le.date >= p_start_date)
     and (p_end_date is null or le.date <= p_end_date)
     and (p_family_id is null or p_family_id in (le.from_family_id, le.to_family_id))
-  order by le.date desc;
+  order by
+    le.date desc,
+    le.created_at desc;
 $$;
 
 -- RPC: list completed sits for entry creation
@@ -2582,8 +2588,8 @@ as $$
   join public.families ff on r.requester_family_id = ff.id
   join public.families tf on o.family_id = tf.id
   cross join me
-  where r.status = 'completed'
-    and r.date >= (public.rpc_local_today() - interval '1 month')::date
+  where r.status in ('assigned','completed')
+    and r.date between (public.rpc_local_today() - interval '1 month')::date and public.rpc_local_today()
     and o.family_id = me.family_id
     and not exists (
       select 1
@@ -2591,7 +2597,8 @@ as $$
       where le.request_id = r.id
         and le.to_family_id = me.family_id
     )
-  order by r.date desc nulls last,
+  order by
+    r.date desc nulls last,
     r.id;
 $$;
 
@@ -2952,7 +2959,9 @@ as $$
   left join public.families f on f.id = fp.family_id
   where public.rpc_my_is_admin()
     and u.email <> 'automation@bbc.clerk'
-  order by u.email, u.id;
+  order by
+    u.email,
+    u.id;
 $$;
 
 -- RPC: move a user to a different family
