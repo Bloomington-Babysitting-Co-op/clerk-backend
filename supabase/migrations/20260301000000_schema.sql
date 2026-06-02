@@ -2464,11 +2464,16 @@ $$;
 -- RPC: family ledger balance table
 create or replace function public.rpc_list_ledger_balances()
 returns table (
+  id uuid,
   name text,
-  active_this_month boolean,
-  active_prior_month boolean,
   hours_balance numeric,
+  this_month_credits numeric,
+  this_month_debits numeric,
+  this_month_admin numeric,
   month_start_balance numeric,
+  prior_month_credits numeric,
+  prior_month_debits numeric,
+  prior_month_admin numeric,
   prior_month_start_balance numeric
 )
 language sql
@@ -2479,18 +2484,43 @@ as $$
   with d as (
     select
       public.rpc_local_today()::date as today,
+      public.rpc_local_month_start()::date as this_month_start,
       (public.rpc_local_month_start() - interval '1 day')::date as prior_month_end,
+      (public.rpc_local_month_start() - interval '1 month')::date as prior_month_start,
       (public.rpc_local_month_start() - interval '1 month 1 day')::date as two_prior_month_end
   )
   select
+    f.id,
     f.name,
-    public.rpc_active_this_month(f.id, d.today) as active_this_month,
-    public.rpc_active_this_month(f.id, d.prior_month_end) as active_prior_month,
     public.rpc_hours_balance_as_of(f.id, d.today) as hours_balance,
+    coalesce(tm.credits, 0) as this_month_credits,
+    coalesce(tm.debits, 0) as this_month_debits,
+    coalesce(tm.admin_net, 0) as this_month_admin,
     public.rpc_hours_balance_as_of(f.id, d.prior_month_end) as month_start_balance,
+    coalesce(pm.credits, 0) as prior_month_credits,
+    coalesce(pm.debits, 0) as prior_month_debits,
+    coalesce(pm.admin_net, 0) as prior_month_admin,
     public.rpc_hours_balance_as_of(f.id, d.two_prior_month_end) as prior_month_start_balance
   from public.families f
   cross join d
+  left join lateral (
+    select
+      sum(case when e.type <> 'admin' and f.id = e.to_family_id then e.hours end) as credits,
+      sum(case when e.type <> 'admin' and f.id = e.from_family_id then -e.hours end) as debits,
+      sum(case when e.type = 'admin' then case when f.id = e.to_family_id then e.hours else -e.hours end end) as admin_net
+    from public.ledger_entries e
+    where f.id IN (e.to_family_id, e.from_family_id)
+      and e.date between d.this_month_start and d.today
+  ) as tm on true
+  left join lateral (
+    select
+      sum(case when e.type <> 'admin' and f.id = e.to_family_id then e.hours end) as credits,
+      sum(case when e.type <> 'admin' and f.id = e.from_family_id then -e.hours end) as debits,
+      sum(case when e.type = 'admin' then case when f.id = e.to_family_id then e.hours else -e.hours end end) as admin_net
+    from public.ledger_entries e
+    where f.id IN (e.to_family_id, e.from_family_id)
+      and e.date between d.prior_month_start and d.prior_month_end
+  ) as pm on true
   where f.is_active = true
   order by
     f.name,
