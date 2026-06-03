@@ -2666,6 +2666,10 @@ begin
     raise exception 'Entries must use your family as recipient';
   end if;
 
+  if v_date < v_today - interval '1 month' then
+    raise exception 'Entry Date cannot be more than a month in the past';
+  end if;
+
   if v_date > v_today then
     raise exception 'Entry Date cannot be in the future';
   end if;
