@@ -2,32 +2,32 @@
 Created for Cloudflare Pages + Supabase + Resend.
 
 ## Setup
-### Link to Remote Project
-```
-npx supabase link --project-ref <your-project-ref>
-```
-
 ### Local Development
 1. Clone this repo
-2. Install dependencies
+2. Install dependencies, with optional update to latest versions
    ```
-   npm install -g npm-check-updates
-   ncu -u
-   npm install
+   # pnpm add -g npm-check-updates
+   # ncu -u
+   pnpm install
    ```
-3. Ensure Docker Desktop is running
+3. Ensure the Docker daemon or Docker Desktop is running
 4. Start the local Supabase stack
    ```
-   npx supabase start
+   pnpm supabase start
    ```
 5. Open a browser to http://localhost:54323 to view Supabase Studio
-6. Create local migrations with `npx supabase migration new <name>`
-7. Push migrations to local with `npx supabase db push --local`
-8. Wipe and reset the local db with `npx supabase db reset --local`
+6. Create local migrations with `pnpm supabase migration new <name>`
+7. Push migrations to local with `pnpm supabase db push --local`
+8. Wipe and reset the local db with `pnpm supabase db reset --local`
+### Link to Remote Project
+   ```
+   pnpm supabase login
+   pnpm supabase link --project-ref jljuisgrqpwsuuyrkgdd
+   ```
 
 ## Deploy
-1. Push migrations to remote with `npx supabase db push`
-2. Push functions to remote with `npx supabase functions deploy send-email`
+1. Push migrations to remote with `pnpm supabase db push`
+2. Push functions to remote with `pnpm supabase functions deploy send-email`
 
 ### Initial Setup
 1. Create an initial user in the [Supabase Authentication dashboard](https://supabase.com/dashboard/project/_/auth/users)
