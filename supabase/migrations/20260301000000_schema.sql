@@ -2581,6 +2581,8 @@ returns table (
   from_family_name text,
   to_family_name text,
   request_date date,
+  start_time time,
+  end_time time,
   drive_time boolean,
   meal_served boolean,
   hours numeric,
@@ -2602,6 +2604,8 @@ as $$
     ff.name as from_family_name,
     tf.name as to_family_name,
     r.date as request_date,
+    r.start_time,
+    r.end_time,
     case when r.sit_location = 'requester_house' then true else false end as drive_time,
     r.meal_required as meal_served,
     coalesce(
