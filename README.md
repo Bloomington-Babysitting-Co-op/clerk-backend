@@ -10,7 +10,13 @@ Created for Cloudflare Pages + Supabase + Resend.
    # ncu -u
    pnpm install
    ```
-3. Ensure the Docker daemon or Docker Desktop is running
+3. Ensure Docker or Podman is running
+   * Docker (linux): `sudo systemctl enable --now docker`
+   * Podman (linux): `systemctl --user enable --now podman.socket`
+      * Add to shell rc file: `export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"`
+   * Docker (windows): Start Docker Desktop and wait for it to report "Running"
+   * Podman (windows): `podman machine start`
+      * Add to shell profile: `set DOCKER_HOST=npipe:////./pipe/podman-machine-default`
 4. Start the local Supabase stack
    ```
    pnpm supabase start
@@ -19,6 +25,10 @@ Created for Cloudflare Pages + Supabase + Resend.
 6. Create local migrations with `pnpm supabase migration new <name>`
 7. Push migrations to local with `pnpm supabase db push --local`
 8. Wipe and reset the local db with `pnpm supabase db reset --local`
+9. Stop the local Supabase stack
+   ```
+   pnpm supabase stop
+   ```
 ### Link to Remote Project
    ```
    pnpm supabase login
