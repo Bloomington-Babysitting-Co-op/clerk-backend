@@ -186,6 +186,24 @@ create index ledger_to_family_id_idx on public.ledger_entries(to_family_id);
 create index ledger_date_idx on public.ledger_entries(date);
 create index ledger_request_id_idx on public.ledger_entries(request_id);
 
+-- Table: ledger_entries_deleted archives deleted ledger entries for audit history
+create table public.ledger_entries_deleted (
+  id uuid primary key,
+  from_family_id uuid,
+  to_family_id uuid,
+  type text not null,
+  date date not null,
+  hours numeric not null,
+  notes text,
+  request_id uuid,
+  created_at timestamptz not null,
+  created_by uuid not null,
+  deleted_at timestamptz not null default now(),
+  deleted_by uuid not null default auth.uid() references auth.users(id)
+);
+
+create index ledger_entries_deleted_deleted_at_idx on public.ledger_entries_deleted(deleted_at);
+
 create table public.email_queue (
   id uuid primary key default gen_random_uuid(),
   type text not null,
@@ -2924,6 +2942,14 @@ begin
     raise exception 'This entry is no longer eligible for deletion';
   end if;
 
+  -- Archive before deleting so audit history survives
+  insert into public.ledger_entries_deleted (
+    id, from_family_id, to_family_id, type, date, hours, notes, request_id, created_at, created_by
+  )
+  values (
+    v_entry.id, v_entry.from_family_id, v_entry.to_family_id, v_entry.type, v_entry.date, v_entry.hours, v_entry.notes, v_entry.request_id, v_entry.created_at, v_entry.created_by
+  );
+
   delete from public.ledger_entries where id = p_entry_id;
 
   -- Notify users who opted into email_ledger_change, reversing the original balance change
@@ -3290,6 +3316,7 @@ alter table if exists public.requests enable row level security;
 alter table if exists public.request_children enable row level security;
 alter table if exists public.offers enable row level security;
 alter table if exists public.ledger_entries enable row level security;
+alter table if exists public.ledger_entries_deleted enable row level security;
 alter table if exists public.email_queue enable row level security;
 
 -- Security: enforce RPC-only access for anon/authenticated

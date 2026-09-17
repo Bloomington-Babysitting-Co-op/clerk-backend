@@ -312,11 +312,15 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
   email_ledger_change: (meta) => {
     const delta = Number(meta.hours_delta ?? 0);
     const balance = Number(meta.current_balance ?? 0);
+    const action = ({
+      rpc_delete_ledger_entry: 'deleted'
+    } as Record<string,string>)[meta.source] ?? 'recorded';
     return {
       subject: 'Your hours balance has changed',
       html: layout(`
         ${heading('Hours balance updated')}
-        ${body(`A ledger entry was recorded by <strong>${meta.author_email}</strong>: ${formatHours(delta)}`)}
+        ${body(`A ledger entry was ${action} by <strong>${meta.author_email}</strong>.`)}
+        ${body(`Your hours balance changed by: ${formatHours(delta)}`)}
         ${body(`Your current balance is: ${formatHours(balance)}`)}
         ${btn(ledgerUrl(), 'View ledger')}
         ${muted('Contact a co-op admin if you believe this entry is incorrect.')}
