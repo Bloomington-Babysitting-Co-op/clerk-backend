@@ -450,11 +450,15 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
       </table>
     `;
 
+    const action = ({
+      rpc_create_request: 'New',
+      rpc_rebroadcast_request: 'Edited'
+    } as Record<string,string>)[meta.source] ?? 'New';
     return {
-      subject: `New ${type} request from the ${family} family`,
+      subject: `${action} ${type} request from the ${family} family`,
       html: layout(`
-        ${heading('New request available')}
-        ${body(`The <strong>${family}</strong> family has posted a new request.`)}
+        ${heading(`${action} request available`)}
+        ${body(`The <strong>${family}</strong> family has posted a request.`)}
         ${detailsTable}
         ${btn(requestViewUrl(req.id || meta.request_id || ''), 'View request')}
         ${muted('Log in to view current details and submit an offer.')}

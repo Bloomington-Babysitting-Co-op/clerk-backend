@@ -1681,6 +1681,56 @@ begin
 end;
 $$;
 
+-- RPC: broadcast an edited request using the new request email template
+create or replace function public.rpc_rebroadcast_request(p_request_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_family_id uuid := public.rpc_my_family_id();
+begin
+  perform public.rpc_refresh_request_statuses();
+
+  if not exists (
+    select 1
+    from public.requests r
+    where r.id = p_request_id
+      and r.requester_family_id = v_family_id
+      and r.status in ('open', 'offered', 'assigned')
+  ) then
+    raise exception 'Request not found or not editable';
+  end if;
+
+  -- Notify users who opted into email_other_request_new
+  perform public.rpc_send_email(
+    'email_other_request_new',
+    'rpc_rebroadcast_request',
+    coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'email', q.email,
+          'meta', jsonb_build_object(
+            'request', (select to_jsonb(public.rpc_get_request(p_request_id))),
+            'children', (select coalesce(jsonb_agg(c), '[]'::jsonb) from public.rpc_list_request_children(p_request_id) c)
+          )
+        )
+      )
+      from (
+        select u.email
+        from auth.users u
+        join public.family_parents fp on fp.user_id = u.id
+        join public.families f on f.id = fp.family_id
+        where fp.family_id <> v_family_id
+          and fp.email_other_request_new = true
+          and f.is_active = true
+      ) as q
+    ), '[]'::jsonb)
+  );
+end;
+$$;
+
 -- RPC: update an open, offered, or assigned request created by current user
 create or replace function public.rpc_update_request(
   p_request_id uuid,
@@ -3288,6 +3338,7 @@ grant execute on function public.rpc_get_request(uuid) to authenticated, service
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
 grant execute on function public.rpc_create_request(text, text, date, time, time, boolean, boolean, boolean, numeric, numeric, text, boolean, boolean, boolean, boolean, uuid[], text, text, integer) to authenticated, service_role;
+grant execute on function public.rpc_rebroadcast_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_update_request(uuid, text, date, time, time, boolean, boolean, boolean, numeric, numeric, text, boolean, boolean, boolean, boolean, uuid[], text, text, integer) to authenticated, service_role;
 grant execute on function public.rpc_cancel_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_create_offer(uuid, text) to authenticated, service_role;
