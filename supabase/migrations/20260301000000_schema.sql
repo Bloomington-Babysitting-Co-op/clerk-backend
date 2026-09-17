@@ -715,6 +715,30 @@ as $$
   select public.rpc_hours_balance_as_of(public.rpc_my_family_id(), public.rpc_local_today());
 $$;
 
+-- RPC: whether the current user may delete a ledger entry created at p_created_at by p_creator_family_id
+create or replace function public.rpc_ledger_entry_can_delete(
+  p_created_at timestamptz,
+  p_creator_family_id uuid
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select case
+    -- Admins: entry created this or last month
+    when public.rpc_my_is_admin() then (
+      (p_created_at at time zone 'America/Chicago')::date >= (public.rpc_local_month_start() - interval '1 month')::date
+    )
+    -- Non-admins: entry created by their own family within the last 5 days
+    else (
+      p_creator_family_id is not distinct from public.rpc_my_family_id()
+      and p_created_at >= (now() - interval '5 day')::date
+    )
+  end;
+$$;
+
 -- RPC: dashboard all available requests
 create or replace function public.rpc_list_other_requests()
 returns table (
@@ -2542,7 +2566,9 @@ returns table (
   hours numeric,
   notes text,
   request_id uuid,
-  email text
+  email text,
+  created_by_family_id uuid,
+  can_delete boolean
 )
 language sql
 stable
@@ -2558,9 +2584,12 @@ as $$
     le.hours,
     le.notes,
     le.request_id,
-    u.email
+    u.email,
+    fp.family_id as created_by_family_id,
+    public.rpc_ledger_entry_can_delete(le.created_at, fp.family_id) as can_delete
   from public.ledger_entries le
   join auth.users u on u.id = le.created_by
+  left join public.family_parents fp on fp.user_id = le.created_by
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
   where (p_start_date is null or le.date >= p_start_date)
@@ -2811,6 +2840,64 @@ begin
         join public.family_parents fp on fp.user_id = u.id
         join public.families f on f.id = fp.family_id
         where fp.family_id IN (p_from_family_id, p_to_family_id)
+          and fp.email_ledger_change = true
+          and f.is_active = true
+      ) as q
+    ), '[]'::jsonb)
+  );
+end;
+$$;
+
+-- RPC: delete a ledger entry (admin: within eligible month window; user: own family's entry within 5 days)
+create or replace function public.rpc_delete_ledger_entry(p_entry_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_entry record;
+begin
+  select le.*, fp.family_id as creator_family_id
+  into v_entry
+  from public.ledger_entries le
+  left join public.family_parents fp on fp.user_id = le.created_by
+  where le.id = p_entry_id
+  for update of le;
+
+  if not found then
+    raise exception 'Ledger entry not found';
+  end if;
+
+  -- Re-check eligibility server-side; never trust a client-supplied flag
+  if not public.rpc_ledger_entry_can_delete(v_entry.created_at, v_entry.creator_family_id) then
+    raise exception 'This entry is no longer eligible for deletion';
+  end if;
+
+  delete from public.ledger_entries where id = p_entry_id;
+
+  -- Notify users who opted into email_ledger_change, reversing the original balance change
+  perform public.rpc_send_email(
+    'email_ledger_change',
+    'rpc_delete_ledger_entry',
+    coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'email', q.email,
+          'meta', jsonb_build_object(
+            'ledger_id', v_entry.id,
+            'hours_delta', case when q.family_id = v_entry.from_family_id then v_entry.hours else -v_entry.hours end,
+            'current_balance', public.rpc_hours_balance_as_of(q.family_id, public.rpc_local_today()),
+            'author_email', (select email from auth.users where id = auth.uid())
+          )
+        )
+      )
+      from (
+        select u.email, fp.family_id
+        from auth.users u
+        join public.family_parents fp on fp.user_id = u.id
+        join public.families f on f.id = fp.family_id
+        where fp.family_id IN (v_entry.from_family_id, v_entry.to_family_id)
           and fp.email_ledger_change = true
           and f.is_active = true
       ) as q
@@ -3172,6 +3259,7 @@ grant all on all functions in schema public to service_role;
 grant execute on function public.rpc_my_family_id() to authenticated, service_role;
 grant execute on function public.rpc_my_is_active() to authenticated, service_role;
 grant execute on function public.rpc_my_is_admin() to authenticated, service_role;
+grant execute on function public.rpc_ledger_entry_can_delete(timestamptz, uuid) to authenticated, service_role;
 
 -- Dashboard
 grant execute on function public.rpc_my_active_this_month() to authenticated, service_role;
@@ -3213,6 +3301,7 @@ grant execute on function public.rpc_list_ledger_balances() to authenticated, se
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_requests_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_create_ledger_entry(uuid, uuid, text, numeric, date, text, uuid) to authenticated, service_role;
+grant execute on function public.rpc_delete_ledger_entry(uuid) to authenticated, service_role;
 
 -- Admin
 grant execute on function public.rpc_admin_create_ledger_entry(numeric, uuid, uuid, date, text) to authenticated, service_role;
