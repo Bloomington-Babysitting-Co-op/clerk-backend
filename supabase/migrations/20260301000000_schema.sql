@@ -488,8 +488,9 @@ as $$
   select case
     when exists (
       select 1
-      from public.offers o
-      where o.request_id = p_request_id
+      from public.requests r
+      where r.id = p_request_id
+        and r.status <> 'open'
     ) then null
     when p_request_date is null then null
     when p_request_date < c.today then null
