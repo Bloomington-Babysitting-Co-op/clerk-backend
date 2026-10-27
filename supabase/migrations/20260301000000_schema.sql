@@ -763,7 +763,7 @@ create or replace function public.rpc_list_other_requests()
 returns table (
   id uuid,
   requester_family_id uuid,
-  family_name text,
+  requester_family_name text,
   status text,
   type text,
   notes text,
@@ -791,7 +791,7 @@ begin
   select
     r.id,
     r.requester_family_id,
-    f.name as family_name,
+    f.name as requester_family_name,
     r.status,
     r.type,
     r.notes,
@@ -837,7 +837,7 @@ $$;
 create or replace function public.rpc_list_my_requests()
 returns table (
   id uuid,
-  family_name text,
+  requester_family_name text,
   status text,
   type text,
   notes text,
@@ -863,7 +863,7 @@ begin
   )
   select
     r.id,
-    f.name as family_name,
+    f.name as requester_family_name,
     r.status,
     r.type,
     r.notes,
@@ -892,7 +892,7 @@ create or replace function public.rpc_list_my_offers()
 returns table (
   id uuid,
   requester_family_id uuid,
-  family_name text,
+  requester_family_name text,
   status text,
   type text,
   notes text,
@@ -921,7 +921,7 @@ begin
   select
     r.id,
     r.requester_family_id,
-    f.name as family_name,
+    f.name as requester_family_name,
     r.status,
     r.type,
     r.notes,
@@ -1351,11 +1351,14 @@ $$;
 create or replace function public.rpc_list_requests_filtered(
   p_start_date date default null,
   p_end_date date default null,
-  p_family_id uuid default null
+  p_family_id uuid default null,
+  p_statuses text[] default null,
+  p_types text[] default null
 )
 returns table (
   id uuid,
-  family_name text,
+  requester_family_name text,
+  assigned_family_name text,
   status text,
   type text,
   notes text,
@@ -1378,7 +1381,8 @@ begin
   return query
   select
     r.id,
-    f.name as family_name,
+    f.name as requester_family_name,
+    af.name as assigned_family_name,
     r.status,
     r.type,
     r.notes,
@@ -1392,9 +1396,14 @@ begin
     public.rpc_request_bg_color(r.id, r.date, r.created_at) as bg_color
   from public.requests r
   join public.families f on f.id = r.requester_family_id
+  left join public.offers ao
+    join public.families af on af.id = ao.family_id
+    on ao.request_id = r.id and ao.assign_order = 1
   where (p_start_date is null or r.date >= p_start_date)
     and (p_end_date is null or r.date <= p_end_date)
     and (p_family_id is null or r.requester_family_id = p_family_id)
+    and (p_statuses is null or r.status = any(p_statuses))
+    and (p_types is null or r.type = any(p_types))
   order by
     r.date asc nulls first,
     r.start_time asc nulls first,
@@ -2628,7 +2637,9 @@ $$;
 create or replace function public.rpc_list_ledger_entries_filtered(
   p_start_date date default null,
   p_end_date date default null,
-  p_family_id uuid default null
+  p_family_id uuid default null,
+  p_direction text default null,
+  p_types text[] default null
 )
 returns table (
   id uuid,
@@ -2665,9 +2676,14 @@ as $$
   left join public.family_parents fp on fp.user_id = le.created_by
   left join public.families ff on ff.id = le.from_family_id
   left join public.families tf on tf.id = le.to_family_id
+  left join public.requests rq on rq.id = le.request_id
   where (p_start_date is null or le.date >= p_start_date)
     and (p_end_date is null or le.date <= p_end_date)
     and (p_family_id is null or p_family_id in (le.from_family_id, le.to_family_id))
+    and (p_family_id is null or p_direction is null
+         or (p_direction = 'credit' and le.to_family_id = p_family_id)
+         or (p_direction = 'debit' and le.from_family_id = p_family_id))
+    and (p_types is null or (case when le.type = 'request' and rq.type is not null then rq.type else le.type end) = any(p_types))
   order by
     le.date desc,
     le.created_at desc;
@@ -3365,7 +3381,7 @@ grant execute on function public.rpc_list_families_all() to authenticated, servi
 grant execute on function public.rpc_list_families_active() to authenticated, service_role;
 
 -- Requests
-grant execute on function public.rpc_list_requests_filtered(date, date, uuid) to authenticated, service_role;
+grant execute on function public.rpc_list_requests_filtered(date, date, uuid, text[], text[]) to authenticated, service_role;
 grant execute on function public.rpc_get_request(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_request_children(uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_offers(uuid) to authenticated, service_role;
@@ -3381,7 +3397,7 @@ grant execute on function public.rpc_unassign_offer(uuid) to authenticated, serv
 
 -- Ledger
 grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
-grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid) to authenticated, service_role;
+grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid, text, text[]) to authenticated, service_role;
 grant execute on function public.rpc_list_requests_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_create_ledger_entry(uuid, uuid, text, numeric, date, text, uuid) to authenticated, service_role;
 grant execute on function public.rpc_delete_ledger_entry(uuid) to authenticated, service_role;
