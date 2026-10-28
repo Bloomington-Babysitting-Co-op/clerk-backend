@@ -764,6 +764,7 @@ returns table (
   id uuid,
   requester_family_id uuid,
   requester_family_name text,
+  assigned_family_name text,
   status text,
   type text,
   notes text,
@@ -792,6 +793,7 @@ begin
     r.id,
     r.requester_family_id,
     f.name as requester_family_name,
+    af.name as assigned_family_name,
     r.status,
     r.type,
     r.notes,
@@ -806,6 +808,9 @@ begin
     public.rpc_request_bg_color(r.id, r.date, r.created_at) as bg_color
   from public.requests r
   join public.families f on f.id = r.requester_family_id
+  left join public.offers ao
+    join public.families af on af.id = ao.family_id
+    on ao.request_id = r.id and ao.assign_order = 1
   cross join me
   where r.requester_family_id <> me.family_id
     and ( r.status in ('open', 'offered')
@@ -838,6 +843,7 @@ create or replace function public.rpc_list_my_requests()
 returns table (
   id uuid,
   requester_family_name text,
+  assigned_family_name text,
   status text,
   type text,
   notes text,
@@ -864,6 +870,7 @@ begin
   select
     r.id,
     f.name as requester_family_name,
+    af.name as assigned_family_name,
     r.status,
     r.type,
     r.notes,
@@ -877,6 +884,9 @@ begin
     public.rpc_request_bg_color(r.id, r.date, r.created_at) as bg_color
   from public.requests r
   join public.families f on f.id = r.requester_family_id
+  left join public.offers ao
+    join public.families af on af.id = ao.family_id
+    on ao.request_id = r.id and ao.assign_order = 1
   cross join me
   where r.requester_family_id = me.family_id
     and r.status in ('open', 'offered', 'assigned')
@@ -893,6 +903,7 @@ returns table (
   id uuid,
   requester_family_id uuid,
   requester_family_name text,
+  assigned_family_name text,
   status text,
   type text,
   notes text,
@@ -922,6 +933,7 @@ begin
     r.id,
     r.requester_family_id,
     f.name as requester_family_name,
+    af.name as assigned_family_name,
     r.status,
     r.type,
     r.notes,
@@ -938,6 +950,9 @@ begin
   from public.offers o
   join public.requests r on r.id = o.request_id
   join public.families f on f.id = r.requester_family_id
+  left join public.offers ao
+    join public.families af on af.id = ao.family_id
+    on ao.request_id = r.id and ao.assign_order = 1
   cross join me
   where o.family_id = me.family_id
     and r.status in ('offered', 'assigned')
