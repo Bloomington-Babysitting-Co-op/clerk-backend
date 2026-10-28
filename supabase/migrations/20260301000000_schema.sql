@@ -2567,48 +2567,60 @@ begin
 end;
 $$;
 
--- RPC: family ledger balance table
-create or replace function public.rpc_list_ledger_balances()
+-- RPC: family ledger balance filtered by optional date range
+create or replace function public.rpc_list_ledger_balances_filtered(
+  p_start_date date default null,
+  p_end_date date default null,
+  p_family_id uuid default null
+)
 returns table (
   id uuid,
   name text,
   hours_balance numeric,
-  this_month_credits numeric,
-  this_month_debits numeric,
-  this_month_admin numeric,
-  month_start_balance numeric,
-  prior_month_credits numeric,
-  prior_month_debits numeric,
-  prior_month_admin numeric,
-  prior_month_start_balance numeric
+  month_start date,
+  credits numeric,
+  debits numeric,
+  admin numeric,
+  start_balance numeric
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  with d as (
+  with t as (
+    select public.rpc_local_today()::date as today
+  ),
+  raw as (
     select
-      public.rpc_local_today()::date as today,
-      public.rpc_local_month_start()::date as this_month_start,
-      (public.rpc_local_month_start() - interval '1 day')::date as prior_month_end,
-      (public.rpc_local_month_start() - interval '1 month')::date as prior_month_start,
-      (public.rpc_local_month_start() - interval '1 month 1 day')::date as two_prior_month_end
+      t.today,
+      coalesce(p_start_date, (select min(le.date) from public.ledger_entries le), t.today) as s,
+      coalesce(p_end_date, t.today) as e
+    from t
+  ),
+  bounds as (
+    select
+      raw.today,
+      date_trunc('month', least(least(raw.s, raw.e), raw.today))::date as start_m,
+      date_trunc('month', least(greatest(raw.s, raw.e), raw.today))::date as end_m
+    from raw
+  ),
+  months as (
+    select gs::date as month_start, (gs + interval '1 month - 1 day')::date as month_end
+    from bounds b, generate_series(b.start_m::timestamp, b.end_m::timestamp, interval '1 month') as gs
   )
   select
     f.id,
     f.name,
-    public.rpc_hours_balance_as_of(f.id, d.today) as hours_balance,
-    coalesce(tm.credits, 0) as this_month_credits,
-    coalesce(tm.debits, 0) as this_month_debits,
-    coalesce(tm.admin_net, 0) as this_month_admin,
-    public.rpc_hours_balance_as_of(f.id, d.prior_month_end) as month_start_balance,
-    coalesce(pm.credits, 0) as prior_month_credits,
-    coalesce(pm.debits, 0) as prior_month_debits,
-    coalesce(pm.admin_net, 0) as prior_month_admin,
-    public.rpc_hours_balance_as_of(f.id, d.two_prior_month_end) as prior_month_start_balance
+    public.rpc_hours_balance_as_of(f.id, b.today) as hours_balance,
+    m.month_start,
+    coalesce(agg.credits, 0) as credits,
+    coalesce(agg.debits, 0) as debits,
+    coalesce(agg.admin_net, 0) as admin,
+    public.rpc_hours_balance_as_of(f.id, (m.month_start - 1)) as start_balance
   from public.families f
-  cross join d
+  cross join bounds b
+  cross join months m
   left join lateral (
     select
       sum(case when e.type <> 'admin' and f.id = e.to_family_id then e.hours end) as credits,
@@ -2616,21 +2628,14 @@ as $$
       sum(case when e.type = 'admin' then case when f.id = e.to_family_id then e.hours else -e.hours end end) as admin_net
     from public.ledger_entries e
     where f.id IN (e.to_family_id, e.from_family_id)
-      and e.date between d.this_month_start and d.today
-  ) as tm on true
-  left join lateral (
-    select
-      sum(case when e.type <> 'admin' and f.id = e.to_family_id then e.hours end) as credits,
-      sum(case when e.type <> 'admin' and f.id = e.from_family_id then -e.hours end) as debits,
-      sum(case when e.type = 'admin' then case when f.id = e.to_family_id then e.hours else -e.hours end end) as admin_net
-    from public.ledger_entries e
-    where f.id IN (e.to_family_id, e.from_family_id)
-      and e.date between d.prior_month_start and d.prior_month_end
-  ) as pm on true
+      and e.date between m.month_start and m.month_end
+  ) as agg on true
   where f.is_active = true
+    and (p_family_id is null or f.id = p_family_id)
   order by
     f.name,
-    f.id;
+    f.id,
+    m.month_start desc;
 $$;
 
 -- RPC: ledger entries filtered by optional date range
@@ -3396,7 +3401,7 @@ grant execute on function public.rpc_assign_offer(uuid, integer) to authenticate
 grant execute on function public.rpc_unassign_offer(uuid) to authenticated, service_role;
 
 -- Ledger
-grant execute on function public.rpc_list_ledger_balances() to authenticated, service_role;
+grant execute on function public.rpc_list_ledger_balances_filtered(date, date, uuid) to authenticated, service_role;
 grant execute on function public.rpc_list_ledger_entries_filtered(date, date, uuid, text, text[]) to authenticated, service_role;
 grant execute on function public.rpc_list_requests_for_entry() to authenticated, service_role;
 grant execute on function public.rpc_create_ledger_entry(uuid, uuid, text, numeric, date, text, uuid) to authenticated, service_role;
