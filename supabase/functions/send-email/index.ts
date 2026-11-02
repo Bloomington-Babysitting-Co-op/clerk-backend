@@ -34,6 +34,181 @@ function btn(href: string, label: string): string {
   return `<a href="${href}" style="display: block; background-color: #1d4ed8; color: #ffffff; text-align: center; padding: 8px 16px; border-radius: 4px; text-decoration: none; font-size: 15px; font-weight: 500; margin-bottom: 16px;">${label}</a>`;
 }
 
+// ─── Calendar helpers ─────────────────────────────────────────────────────────
+
+const USER_TIME_ZONE = 'America/Chicago';
+const DEFAULT_EVENT_MINUTES = 60;
+
+type Attachment = { filename: string; content: string; content_type: string };
+
+function localDateTimeParts(instant: Date): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: USER_TIME_ZONE, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(instant);
+  const p = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: p('year'), month: p('month'), day: p('day'),
+    hour: p('hour'), minute: p('minute'), second: p('second'),
+  };
+}
+
+// Offset (ms) of the co-op time zone from UTC at the given instant.
+function zoneOffsetMs(instant: Date): number {
+  const { year, month, day, hour, minute, second } = localDateTimeParts(instant);
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  return asUtc - instant.getTime();
+}
+
+// Converts a co-op local date and time to UTC; ambiguous fall-back times use the earlier instant.
+function localToUtc(date: string, time: string): Date | null {
+  const d = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const t = time.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!d || !t) return null;
+  const [year, month, day] = d.slice(1).map(Number);
+  const hour = Number(t[1]);
+  const minute = Number(t[2]);
+  const second = Number(t[3] ?? 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+
+  const localAsUtc = new Date(0);
+  localAsUtc.setUTCFullYear(year, month - 1, day);
+  localAsUtc.setUTCHours(hour, minute, second, 0);
+  if (
+    localAsUtc.getUTCFullYear() !== year
+    || localAsUtc.getUTCMonth() !== month - 1
+    || localAsUtc.getUTCDate() !== day
+  ) return null;
+
+  const naive = localAsUtc.getTime();
+  const offsets = new Set([
+    zoneOffsetMs(new Date(naive - 86_400_000)),
+    zoneOffsetMs(new Date(naive)),
+    zoneOffsetMs(new Date(naive + 86_400_000)),
+  ]);
+  const candidates = [...offsets]
+    .map((offset) => new Date(naive - offset))
+    .filter((candidate) => {
+      const local = localDateTimeParts(candidate);
+      return local.year === year && local.month === month && local.day === day
+        && local.hour === hour && local.minute === minute && local.second === second;
+    })
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  return candidates[0] ?? null;
+}
+
+function icsStamp(d: Date): string {
+  return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+}
+
+function icsEscape(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/\r?\n/g, '\\n').replace(/;/g, '\\;').replace(/,/g, '\\,');
+}
+
+function buildCalendarLinks(
+  req: Record<string, any>,
+  requestId: unknown,
+  sitterAddress?: unknown,
+): { html: string; attachment: Attachment } | null {
+  const dateStr = req.date ? String(req.date) : '';
+  const startStr = req.start_time ? String(req.start_time) : '';
+  if (!dateStr || !startStr) return null;
+
+  const start = localToUtc(dateStr, startStr);
+  if (!start) return null;
+  const endLocal = req.end_time ? localToUtc(dateStr, String(req.end_time)) : null;
+  const end = endLocal && endLocal > start
+    ? endLocal
+    : new Date(start.getTime() + DEFAULT_EVENT_MINUTES * 60_000);
+
+  const type = String(req.type ?? '').toLowerCase();
+  const family = String(req.requester_family_name ?? '').trim();
+  const typeLabel = type === 'drive' ? 'Drive' : type === 'babysit' ? 'Babysit' : 'Request';
+  const title = `${typeLabel}${family ? ` ${family} family` : ''}`;
+
+  // A calendar event has a single location, so only one address can be used.
+  const clean = (v: unknown) => String(v ?? '').trim();
+  const origin = clean(req.origin);
+  const destination = clean(req.destination);
+  let location = '';
+  const routeNotes: string[] = [];
+  if (type === 'drive') {
+    location = origin;
+    if (origin || destination) routeNotes.push(`Route: ${origin || '?'} to ${destination || '?'}`);
+  } else if (type === 'babysit') {
+    const requesterAddress = clean(req.requester_family_address);
+    switch (clean(req.sit_location)) {
+      case 'requester_house':
+        location = requesterAddress;
+        break;
+      case 'sitter_house':
+        location = clean(sitterAddress);
+        break;
+      case 'either':
+        location = requesterAddress;
+        routeNotes.push('Sit location: either house, to be arranged.');
+        if (requesterAddress) routeNotes.push(`Requester's address: ${requesterAddress}`);
+        if (clean(sitterAddress)) routeNotes.push(`Sitter's address: ${clean(sitterAddress)}`);
+        break;
+    }
+  }
+  const url = requestViewUrl(requestId);
+  const notes = String(req.notes ?? '').trim();
+  const flex = (req.flexible_date || req.flexible_start_time || req.flexible_end_time)
+    ? 'Date/time is flexible, check the request for the latest details.' : '';
+  const details = [notes, ...routeNotes, flex, `Request: ${url}`].filter(Boolean).join('\n\n');
+
+  const google = 'https://calendar.google.com/calendar/render?' + new URLSearchParams({
+    action: 'TEMPLATE', text: title, dates: `${icsStamp(start)}/${icsStamp(end)}`, details, location,
+  }).toString();
+  const outlook = 'https://outlook.live.com/calendar/0/deeplink/compose?' + new URLSearchParams({
+    path: '/calendar/action/compose', rru: 'addevent', subject: title,
+    startdt: start.toISOString(), enddt: end.toISOString(), body: details, location,
+  }).toString();
+
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Bloomington Babysitting Co-op//BBC Clerk//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:request-${String(requestId)}@bbc-clerk`,
+    `DTSTAMP:${icsStamp(new Date())}`,
+    `DTSTART:${icsStamp(start)}`,
+    `DTEND:${icsStamp(end)}`,
+    `SUMMARY:${icsEscape(title)}`,
+    `DESCRIPTION:${icsEscape(details)}`,
+    ...(location ? [`LOCATION:${icsEscape(location)}`] : []),
+    `URL:${url}`,
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n') + '\r\n';
+  const bytes = new TextEncoder().encode(ics);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+
+  const link = (href: string, label: string) =>
+    `<a href="${href.replace(/&/g, '&amp;')}" style="color: #1d4ed8; text-decoration: none; font-weight: 500;">${label}</a>`;
+  const html = `
+    <p style="font-size: 14px; color: #374151; margin: 0 0 16px 0; line-height: 1.6;">
+      <strong>Add to calendar:</strong>
+      ${link(google, 'Google')} &middot; ${link(outlook, 'Outlook')} &middot; Apple / iCal (.ics file attached)
+    </p>`;
+
+  return {
+    html,
+    attachment: {
+      filename: 'request.ics',
+      content: btoa(binary),
+      content_type: 'text/calendar; charset=utf-8; method=PUBLISH',
+    },
+  };
+}
+
 function muted(text: string): string {
   return `<p style="font-size: 13px; color: #6b7280; margin: 0; line-height: 1.5;">${text}</p>`;
 }
@@ -267,7 +442,7 @@ function collectRecipientEmails(row: Record<string, unknown>): string[] {
 
 type Meta = Record<string, unknown> & { source: string };
 
-const templates: Record<string, (meta: Meta) => { subject: string; html: string }> = {
+const templates: Record<string, (meta: Meta) => { subject: string; html: string; attachments?: Attachment[] }> = {
 
   // End-of-month hours summary (1st of next month)
   email_endmonth_summary: (meta) => {
@@ -545,7 +720,12 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
 
   // Your offer was assigned / unassigned / reassigned to a different priority
   email_my_offer_assigned: (meta) => {
+    const req = (meta.request ?? {}) as Record<string, any>;
+    const calendar = meta.action === 'assigned'
+      ? buildCalendarLinks(req, meta.request_id ?? req.id, meta.sitter_family_address)
+      : null;
     return {
+      attachments: calendar ? [calendar.attachment] : undefined,
       subject: `Your offer to help has been ${meta.action}`,
       html: layout(`
         ${heading('Your offer status changed')}
@@ -556,6 +736,7 @@ const templates: Record<string, (meta: Meta) => { subject: string; html: string 
             ? body('You are now expected to complete the request.')
             : body('You may be asked to complete the request if the primary becomes unavailable.')
         }
+        ${calendar ? calendar.html : ''}
         ${btn(requestViewUrl(meta.request_id), 'View request')}
         ${muted('Log in to view details.')}
       `),
@@ -676,6 +857,8 @@ Deno.serve(async (req: Request) => {
   }
 
   const emails: Array<{ from: string; to: string[]; subject: string; html: string }> = [];
+  // Resend's batch endpoint doesn't support attachments, so those are sent individually.
+  const attachmentEmails: Array<{ from: string; to: string[]; subject: string; html: string; attachments: Attachment[] }> = [];
   let recipientCount = 0;
   for (let i = 0; i < recipients.length; i += 1) {
     const recipient = recipients[i];
@@ -706,24 +889,65 @@ Deno.serve(async (req: Request) => {
     // Resend supports up to 50 recipients in the to[] list for a single message.
     const recipientGroups = chunk(recipientEmails, 1);
     for (const toList of recipientGroups) {
-      emails.push({
-        from: RESEND_FROM_EMAIL,
-        to: toList,
-        subject: rendered.subject,
-        html: rendered.html,
-      });
+      if (rendered.attachments?.length) {
+        attachmentEmails.push({
+          from: RESEND_FROM_EMAIL,
+          to: toList,
+          subject: rendered.subject,
+          html: rendered.html,
+          attachments: rendered.attachments,
+        });
+      } else {
+        emails.push({
+          from: RESEND_FROM_EMAIL,
+          to: toList,
+          subject: rendered.subject,
+          html: rendered.html,
+        });
+      }
       recipientCount += toList.length;
     }
   }
 
-  if (emails.length === 0) {
+  if (emails.length === 0 && attachmentEmails.length === 0) {
     return new Response(JSON.stringify({ data: [], count: 0, messages: 0, batches: 0 }), {
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  const batches = chunk(emails, 100);
   const sent: unknown[] = [];
+
+  for (let i = 0; i < attachmentEmails.length; i += 1) {
+    const queueId = typeof queueEvent.id === 'string' ? queueEvent.id : '';
+    const key = queueId
+      ? `${type}/${source}/${queueId}/single-${i}`
+      : `${type}/${source}/hash-${await sha256Hex(JSON.stringify({ i, to: attachmentEmails[i].to, subject: attachmentEmails[i].subject }))}`;
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Idempotency-Key': key.slice(0, 256),
+      },
+      body: JSON.stringify(attachmentEmails[i]),
+    });
+    const raw = await res.text();
+    let data: unknown = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch (_err) { data = { raw }; }
+    if (!res.ok) {
+      return new Response(JSON.stringify({
+        error: 'Resend send failed',
+        status: res.status,
+        details: data,
+      }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (data !== null) sent.push(data);
+  }
+
+  const batches = chunk(emails, 100);
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
     const batch = batches[batchIndex];
@@ -770,7 +994,7 @@ Deno.serve(async (req: Request) => {
   return new Response(JSON.stringify({
     data: sent,
     count: recipientCount,
-    messages: emails.length,
+    messages: emails.length + attachmentEmails.length,
     batches: batches.length,
   }), {
     headers: { 'Content-Type': 'application/json' },

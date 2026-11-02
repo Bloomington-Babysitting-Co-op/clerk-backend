@@ -2426,7 +2426,9 @@ begin
         'requester_family_name', public.rpc_family_name(v_requester_family_id),
         'action', r.action,
         'assign_order', r.assign_order,
-        'show_assign_order', (r.assign_order is not null and v_max_assign_order > 1)
+        'show_assign_order', (r.assign_order is not null and v_max_assign_order > 1),
+        'request', (select to_jsonb(public.rpc_get_request(v_offer_request_id))),
+        'sitter_family_address', f.address
       )
     )
   ), '[]'::jsonb)
