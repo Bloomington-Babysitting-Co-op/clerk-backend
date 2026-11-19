@@ -60,6 +60,8 @@ Created for Cloudflare Pages + Supabase + Resend.
    * Type: `Supabase Edge Functions`
    * Method: `POST`
    * Function: `send-email`
-   * Add a new HTTP Header with 
+   * Under HTTP Headers, add the project's current secret API key (not the legacy `service_role` key)
+   * Add a new HTTP Header with
       * Key: `x-supabase-webhook-source`
       * Value: copied from remote `WEBHOOK_KEY` value in `.env`
+   * `send-email` uses this custom header for authentication; its `verify_jwt = false` setting is required for the current secret API key.
